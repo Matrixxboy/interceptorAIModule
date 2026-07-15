@@ -45,8 +45,8 @@ from utils.calib_io import DEFAULT_PATH, fpv_config_from_dict, load_calibration
 # TELEMETRY / CAMERA CONFIG  (overridden by calibration.json)
 # ============================================================
 
-CONTROL_PORT = "COM4"
-CONTROL_BAUD = 57600
+CONTROL_PORT = "COM5"
+CONTROL_BAUD = 115200
 
 CAMERA_INDEX = 1
 FRAME_WIDTH = 1280

@@ -22,6 +22,7 @@ AERIAL_THREAT_CLASSES: tuple[str, ...] = (
     "projectile",
     "aircraft",
     "helicopter",
+    "person",
 )
 
 DetectionMode = Literal["world", "coco", "custom"]
@@ -42,8 +43,8 @@ class DetectionConfig:
     iou_threshold: float = 0.45
     max_det: int = 20
     world_classes: Sequence[str] = AERIAL_THREAT_CLASSES
-    # COCO: airplane=4, bird=14, sports ball=32, kite=33
-    class_filter: Sequence[int] = (4, 14, 32, 33)
+    # COCO: person=0, airplane=4, bird=14, sports ball=32, kite=33
+    class_filter: Sequence[int] = (0, 4, 14, 32, 33)
     min_box_area_frac: float = 0.00005
     max_box_area_frac: float = 0.35
     device: str = "auto"  # "auto" | "cuda" | "cpu"

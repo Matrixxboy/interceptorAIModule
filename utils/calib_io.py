@@ -14,7 +14,7 @@ DEFAULT_CALIB: dict[str, Any] = {
     "camera_index": 1,
     "frame_width": 1280,
     "frame_height": 720,
-    "control_port": "COM4",
+    "control_port": "COM5",
     "control_baud": 57600,
     "use_yolo": True,
     "yolo_every_n": 4,
