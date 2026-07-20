@@ -1,14 +1,16 @@
-"""Central configuration for FPV MSP visual lock + follow."""
+"""Central configuration for FPV MSP visual lock + follow system."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import json
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Literal, Sequence
+from typing import Any, Literal, Sequence
 
 ROOT = Path(__file__).resolve().parent
 MODELS_DIR = ROOT / "models"
-
+PRESETS_DIR = ROOT / "presets"
+PRESETS_DIR.mkdir(exist_ok=True, parents=True)
 
 # Open-vocab prompts (used when detection.mode = "world")
 AERIAL_THREAT_CLASSES: tuple[str, ...] = (
@@ -29,9 +31,70 @@ DetectionMode = Literal["world", "coco", "custom"]
 TrackerBackend = Literal["bytetrack", "botsort", "iou", "csrt", "kcf"]
 
 
-@dataclass(frozen=True)
+@dataclass
+class PIDAxisConfig:
+    kp: float = 320.0
+    ki: float = 40.0
+    kd: float = 55.0
+    max_output: float = 380.0
+    i_limit: float = 0.45
+    d_filter: float = 0.35
+
+
+@dataclass
+class DistanceConfig:
+    focal_length_px: float = 800.0  # Camera focal length in pixels
+    known_object_width_m: float = 0.30  # Physical width of object (e.g. 30 cm drone)
+    desired_distance_m: float = 5.0  # Safe nominal follow distance in meters
+    min_safe_distance_m: float = 2.0  # Dangerously close threshold
+    max_follow_distance_m: float = 25.0  # Maximum follow range
+    kp: float = 120.0
+    ki: float = 15.0
+    kd: float = 25.0
+    max_pitch_offset: float = 200.0  # Pitch stick change for distance correction
+
+
+@dataclass
+class PredictionConfig:
+    enable_kalman: bool = True
+    process_noise_q: float = 1e-2
+    measurement_noise_r: float = 1e-1
+    lead_time_s: float = 0.12  # Seconds of lead trajectory prediction
+    smoothing_factor: float = 0.45
+
+
+@dataclass
+class SafetyConfig:
+    min_conf_threshold: float = 0.35
+    max_lost_frames: int = 45
+    reacquisition_timeout_s: float = 2.5
+    max_yaw_rate: float = 1600.0  # µs/s slew limit
+    max_climb_rate: float = 1400.0  # µs/s slew limit
+    max_descent_rate: float = 1200.0  # µs/s slew limit
+    max_forward_speed: float = 350.0  # max pitch µs offset forward
+    max_backward_speed: float = 250.0  # max pitch µs offset backward
+    max_acceleration: float = 1800.0  # µs/s^2 acceleration limit
+
+
+@dataclass
+class OffsetsConfig:
+    horizontal_offset_norm: float = 0.0  # Center offset [-1..1]
+    vertical_offset_norm: float = 0.0
+    deadzone_norm: float = 0.02
+    deadzone_bleed: float = 0.15
+
+
+@dataclass
+class CameraConfig:
+    fov_h_deg: float = 90.0
+    fov_v_deg: float = 60.0
+    frame_width: int = 1280
+    frame_height: int = 720
+    camera_index: int = 1
+
+
+@dataclass
 class DetectionConfig:
-    # coco + yolov8n.pt is the reliable default; use world/custom when ready
     mode: DetectionMode = "coco"
     model_name: str = "yolov8n.pt"
     model_path: Path = field(default_factory=lambda: MODELS_DIR / "yolov8n.pt")
@@ -43,7 +106,6 @@ class DetectionConfig:
     iou_threshold: float = 0.45
     max_det: int = 20
     world_classes: Sequence[str] = AERIAL_THREAT_CLASSES
-    # COCO: person=0, airplane=4, bird=14, sports ball=32, kite=33
     class_filter: Sequence[int] = (0, 4, 14, 32, 33)
     min_box_area_frac: float = 0.00005
     max_box_area_frac: float = 0.35
@@ -53,7 +115,7 @@ class DetectionConfig:
     augment: bool = False
 
 
-@dataclass(frozen=True)
+@dataclass
 class TrackerConfig:
     backend: TrackerBackend = "bytetrack"
     max_age: int = 45
@@ -66,10 +128,66 @@ class TrackerConfig:
     template_match_threshold: float = 0.45
 
 
-@dataclass(frozen=True)
-class AppConfig:
+@dataclass
+class SystemConfig:
     detection: DetectionConfig = field(default_factory=DetectionConfig)
     tracker: TrackerConfig = field(default_factory=TrackerConfig)
+    yaw_pid: PIDAxisConfig = field(default_factory=lambda: PIDAxisConfig(340.0, 45.0, 60.0, 400.0))
+    altitude_pid: PIDAxisConfig = field(default_factory=lambda: PIDAxisConfig(310.0, 40.0, 55.0, 360.0))
+    position_pid: PIDAxisConfig = field(default_factory=lambda: PIDAxisConfig(150.0, 20.0, 30.0, 200.0))
+    distance: DistanceConfig = field(default_factory=DistanceConfig)
+    prediction: PredictionConfig = field(default_factory=PredictionConfig)
+    safety: SafetyConfig = field(default_factory=SafetyConfig)
+    offsets: OffsetsConfig = field(default_factory=OffsetsConfig)
+    camera: CameraConfig = field(default_factory=CameraConfig)
+
+    def to_dict(self) -> dict[str, Any]:
+        d = asdict(self)
+
+        def convert_paths(obj: Any) -> Any:
+            if isinstance(obj, Path):
+                return str(obj)
+            if isinstance(obj, dict):
+                return {k: convert_paths(v) for k, v in obj.items()}
+            if isinstance(obj, list):
+                return [convert_paths(v) for v in obj]
+            return obj
+
+        return convert_paths(d)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> SystemConfig:
+        cfg = cls()
+
+        def update_dataclass(target: Any, d: dict[str, Any]) -> None:
+            for k, v in d.items():
+                if hasattr(target, k):
+                    curr = getattr(target, k)
+                    if isinstance(v, dict) and hasattr(curr, "__dataclass_fields__"):
+                        update_dataclass(curr, v)
+                    elif isinstance(curr, Path):
+                        setattr(target, k, Path(v))
+                    else:
+                        setattr(target, k, v)
+
+        update_dataclass(cfg, data)
+        return cfg
+
+    def save_json(self, filepath: str | Path) -> None:
+        p = Path(filepath)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(self.to_dict(), f, indent=2)
+
+    @classmethod
+    def load_json(cls, filepath: str | Path) -> SystemConfig:
+        p = Path(filepath)
+        if not p.exists():
+            return cls()
+        with open(p, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return cls.from_dict(data)
 
 
-CONFIG = AppConfig()
+CONFIG = SystemConfig()
+AppConfig = SystemConfig  # Backwards compatibility alias

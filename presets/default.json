@@ -1,0 +1,115 @@
+{
+  "detection": {
+    "mode": "coco",
+    "model_name": "yolov8n.pt",
+    "model_path": "D:\\interceptor\\interceptorAIModule\\models\\yolov8n.pt",
+    "custom_weights": "D:\\interceptor\\interceptorAIModule\\models\\drone_missile_best.pt",
+    "imgsz": 640,
+    "conf_threshold": 0.25,
+    "iou_threshold": 0.45,
+    "max_det": 20,
+    "world_classes": [
+      "drone",
+      "quadcopter",
+      "UAV",
+      "FPV drone",
+      "missile",
+      "cruise missile",
+      "rocket",
+      "projectile",
+      "aircraft",
+      "helicopter",
+      "person"
+    ],
+    "class_filter": [
+      0,
+      4,
+      14,
+      32,
+      33
+    ],
+    "min_box_area_frac": 5e-05,
+    "max_box_area_frac": 0.35,
+    "device": "auto",
+    "half": true,
+    "detect_every_n": 3,
+    "augment": false
+  },
+  "tracker": {
+    "backend": "bytetrack",
+    "max_age": 45,
+    "min_hits": 2,
+    "iou_match_threshold": 0.25,
+    "lock_tracker": "csrt",
+    "reacquire_iou": 0.12,
+    "reacquire_max_frames": 90,
+    "enable_template_fallback": true,
+    "template_match_threshold": 0.45
+  },
+  "yaw_pid": {
+    "kp": 340.0,
+    "ki": 45.0,
+    "kd": 60.0,
+    "max_output": 400.0,
+    "i_limit": 0.45,
+    "d_filter": 0.35
+  },
+  "altitude_pid": {
+    "kp": 310.0,
+    "ki": 40.0,
+    "kd": 55.0,
+    "max_output": 360.0,
+    "i_limit": 0.45,
+    "d_filter": 0.35
+  },
+  "position_pid": {
+    "kp": 150.0,
+    "ki": 20.0,
+    "kd": 30.0,
+    "max_output": 200.0,
+    "i_limit": 0.45,
+    "d_filter": 0.35
+  },
+  "distance": {
+    "focal_length_px": 800.0,
+    "known_object_width_m": 0.3,
+    "desired_distance_m": 5.0,
+    "min_safe_distance_m": 2.0,
+    "max_follow_distance_m": 25.0,
+    "kp": 120.0,
+    "ki": 15.0,
+    "kd": 25.0,
+    "max_pitch_offset": 200.0
+  },
+  "prediction": {
+    "enable_kalman": true,
+    "process_noise_q": 0.01,
+    "measurement_noise_r": 0.1,
+    "lead_time_s": 0.12,
+    "smoothing_factor": 0.45
+  },
+  "safety": {
+    "min_conf_threshold": 0.35,
+    "max_lost_frames": 45,
+    "reacquisition_timeout_s": 2.5,
+    "max_yaw_rate": 1600.0,
+    "max_climb_rate": 1400.0,
+    "max_descent_rate": 1200.0,
+    "max_forward_speed": 350.0,
+    "max_backward_speed": 250.0,
+    "max_acceleration": 1800.0
+  },
+  "offsets": {
+    "horizontal_offset_norm": 0.0,
+    "vertical_offset_norm": 0.0,
+    "deadzone_norm": 0.02,
+    "deadzone_bleed": 0.15
+  },
+  "camera": {
+    "fov_h_deg": 90.0,
+    "fov_v_deg": 60.0,
+    "frame_width": 1280,
+    "frame_height": 720,
+    "camera_index": 1
+  }
+}

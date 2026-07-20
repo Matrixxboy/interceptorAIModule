@@ -1,253 +1,166 @@
-"""
-FPV visual-servo follow controller.
-
-For a fixed forward camera on an FPV / interceptor drone:
-  - Horizontal error  → YAW  (turn to face target)
-  - Vertical error    → PITCH (nose toward target)
-  - Roll is optional and light (strafe) — default off for pure aim
-
-Uses normalized image error, lead prediction, filtered D-term,
-progressive authority, and slew limiting so sticks track cleanly.
-"""
+"""FPV visual-servo follow controller supporting 4-axis control (Yaw, Altitude/Pitch, Distance, Roll)."""
 
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass
 
+from config import SystemConfig
+from control.pid_controller import PIDController
+from estimation.distance_estimator import DistanceEstimate, DistanceEstimator
+from tracking.motion_predictor import MotionPredictor, TrajectoryEstimate
 
-def _clamp(v: float, lo: float, hi: float) -> float:
-    return lo if v < lo else hi if v > hi else v
+
+def clamp(val: float, lo: float, hi: float) -> float:
+    return lo if val < lo else hi if val > hi else val
 
 
 @dataclass
 class FPVFollowConfig:
-    # Soft deadzone in normalized coords (|error| / half-frame)
     deadzone_norm: float = 0.02
-    # Keep a tiny residual inside deadzone so sticks don't "stick" off-center
     deadzone_bleed: float = 0.15
-
-    # PID on normalized error [-1..1] → stick offset (µs)
-    yaw_kp: float = 320.0
-    yaw_ki: float = 40.0
-    yaw_kd: float = 55.0
-
-    pitch_kp: float = 300.0
-    pitch_ki: float = 35.0
-    pitch_kd: float = 50.0
-
+    yaw_kp: float = 340.0
+    yaw_ki: float = 45.0
+    yaw_kd: float = 60.0
+    pitch_kp: float = 310.0
+    pitch_ki: float = 40.0
+    pitch_kd: float = 55.0
     roll_kp: float = 80.0
     roll_ki: float = 8.0
     roll_kd: float = 15.0
-
-    # Max stick offsets from 1500
-    max_yaw: float = 380.0
-    max_pitch: float = 350.0
+    max_yaw: float = 400.0
+    max_pitch: float = 360.0
     max_roll: float = 120.0
-
-    i_limit: float = 0.45  # on normalized integral
-    d_filter: float = 0.35  # EMA on derivative (higher = less lag)
-
-    # Progressive gain: |e|^expo — <1 soft near center, >1 aggressive far
+    i_limit: float = 0.45
+    d_filter: float = 0.35
     expo: float = 0.85
-
-    # Lead time (seconds) using image-plane velocity
     lead_s: float = 0.12
-
-    # Measurement EMA (center px) — reduces tracker jitter before PID
     meas_alpha: float = 0.45
-
-    # Stick output EMA + slew (µs/s)
     out_alpha: float = 0.55
-    slew_yaw: float = 1400.0
-    slew_pitch: float = 1200.0
+    slew_yaw: float = 1600.0
+    slew_pitch: float = 1400.0
     slew_roll: float = 600.0
-
-    # Axis directions (flip if your FC/camera mapping is reversed)
     yaw_dir: float = 1.0
-    pitch_dir: float = -1.0  # image y down → pitch up when target above
+    pitch_dir: float = -1.0
     roll_dir: float = 1.0
-
-    use_roll: bool = False  # FPV aim: yaw+pitch only by default
-    roll_blend: float = 0.25  # if use_roll, fraction of horizontal into roll
-
+    use_roll: bool = False
+    roll_blend: float = 0.25
     rc_mid: int = 1500
     rc_min: int = 1000
     rc_max: int = 2000
 
 
 class FPVFollowController:
-    def __init__(self, cfg: FPVFollowConfig | None = None) -> None:
-        self.cfg = cfg or FPVFollowConfig()
+    def __init__(self, sys_cfg: SystemConfig | None = None) -> None:
+        self.sys_cfg = sys_cfg or SystemConfig()
+        self.cfg = FPVFollowConfig(
+            yaw_kp=self.sys_cfg.yaw_pid.kp,
+            yaw_ki=self.sys_cfg.yaw_pid.ki,
+            yaw_kd=self.sys_cfg.yaw_pid.kd,
+            pitch_kp=self.sys_cfg.altitude_pid.kp,
+            pitch_ki=self.sys_cfg.altitude_pid.ki,
+            pitch_kd=self.sys_cfg.altitude_pid.kd,
+            max_yaw=self.sys_cfg.yaw_pid.max_output,
+            max_pitch=self.sys_cfg.altitude_pid.max_output,
+            deadzone_norm=self.sys_cfg.offsets.deadzone_norm,
+            lead_s=self.sys_cfg.prediction.lead_time_s,
+        )
+
+        self.yaw_pid = PIDController(self.sys_cfg.yaw_pid)
+        self.altitude_pid = PIDController(self.sys_cfg.altitude_pid)
+        self.distance_estimator = DistanceEstimator(self.sys_cfg.distance)
+        self.motion_predictor = MotionPredictor(self.sys_cfg.prediction)
+
         self.reset()
+
+    def update_sys_config(self, sys_cfg: SystemConfig) -> None:
+        self.sys_cfg = sys_cfg
+        self.yaw_pid.update_config(sys_cfg.yaw_pid)
+        self.altitude_pid.update_config(sys_cfg.altitude_pid)
+        self.distance_estimator.update_config(sys_cfg.distance)
+        self.motion_predictor.update_config(sys_cfg.prediction)
+        self.cfg.deadzone_norm = sys_cfg.offsets.deadzone_norm
+        self.cfg.lead_s = sys_cfg.prediction.lead_time_s
 
     def reset(self) -> None:
         c = self.cfg
-        self._ix = 0.0
-        self._iy = 0.0
-        self._prev_nx = 0.0
-        self._prev_ny = 0.0
-        self._dn_x = 0.0
-        self._dn_y = 0.0
-        self._has_prev = False
-        self._smoothed_cx: float | None = None
-        self._smoothed_cy: float | None = None
-        self._vx = 0.0
-        self._vy = 0.0
-        self._out_yaw = 0.0
-        self._out_pitch = 0.0
-        self._out_roll = 0.0
+        self.yaw_pid.reset()
+        self.altitude_pid.reset()
+        self.distance_estimator.reset()
+        self.motion_predictor.reset()
+
         self._cmd_roll = float(c.rc_mid)
         self._cmd_pitch = float(c.rc_mid)
         self._cmd_yaw = float(c.rc_mid)
         self._t: float | None = None
 
-    def _shape(self, n: float) -> float:
-        """Soft deadzone + expo curve on normalized error."""
-        c = self.cfg
-        a = abs(n)
-        if a < c.deadzone_norm:
-            return n * c.deadzone_bleed
-        # Remap outside deadzone to full range, then expo
-        sign = 1.0 if n >= 0 else -1.0
-        remapped = (a - c.deadzone_norm) / max(1e-6, 1.0 - c.deadzone_norm)
-        remapped = _clamp(remapped, 0.0, 1.0)
-        return sign * (remapped ** c.expo)
-
-    def _axis_pid(
-        self,
-        n: float,
-        integral: float,
-        prev_n: float,
-        dn_filt: float,
-        kp: float,
-        ki: float,
-        kd: float,
-        dt: float,
-        direction: float,
-        max_out: float,
-    ) -> tuple[float, float, float]:
-        c = self.cfg
-        shaped = self._shape(n)
-
-        # Integrate shaped error; bleed when near center
-        if abs(n) < c.deadzone_norm:
-            integral *= 0.92
-        else:
-            integral = _clamp(integral + shaped * dt, -c.i_limit, c.i_limit)
-
-        raw_d = (n - prev_n) / dt if dt > 1e-4 else 0.0
-        dn = c.d_filter * raw_d + (1.0 - c.d_filter) * dn_filt
-
-        out = direction * (kp * shaped + ki * integral + kd * dn)
-        out = _clamp(out, -max_out, max_out)
-        return out, integral, dn
+        self.last_trajectory: TrajectoryEstimate | None = None
+        self.last_distance: DistanceEstimate | None = None
 
     def update(
         self,
-        obj_cx: float,
-        obj_cy: float,
+        bbox_xywh: tuple[float, float, float, float] | None,
         frame_w: int,
         frame_h: int,
     ) -> tuple[int, int, int]:
-        """
-        Returns (roll, pitch, yaw) RC µs.
-        obj_cx/cy = tracked target center in pixels.
-        """
         c = self.cfg
         now = time.perf_counter()
-        if self._t is None:
-            dt = 1.0 / 50.0
-        else:
-            dt = _clamp(now - self._t, 0.001, 0.08)
+        dt = 0.033 if self._t is None else clamp(now - self._t, 0.001, 0.1)
         self._t = now
 
-        # Smooth measurement + estimate image velocity (px/s)
-        if self._smoothed_cx is None:
-            self._smoothed_cx = float(obj_cx)
-            self._smoothed_cy = float(obj_cy)
-            self._vx = 0.0
-            self._vy = 0.0
-        else:
-            prev_x, prev_y = self._smoothed_cx, self._smoothed_cy
-            a = c.meas_alpha
-            self._smoothed_cx = a * float(obj_cx) + (1.0 - a) * prev_x
-            self._smoothed_cy = a * float(obj_cy) + (1.0 - a) * prev_y
-            self._vx = (self._smoothed_cx - prev_x) / dt
-            self._vy = (self._smoothed_cy - prev_y) / dt
+        # Update motion prediction & trajectory estimation
+        traj = self.motion_predictor.update(bbox_xywh, dt)
+        self.last_trajectory = traj
+
+        if bbox_xywh is None and not self.motion_predictor.kalman.initialized:
+            return self.fade_to_mid()
+
+        # Update distance estimation using bbox width
+        curr_w_px = traj.smoothed_bbox[2] if traj.smoothed_bbox[2] > 0 else (bbox_xywh[2] if bbox_xywh else 50.0)
+        dist_est = self.distance_estimator.compute_following_control(curr_w_px, dt)
+        self.last_distance = dist_est
 
         half_w = max(1.0, frame_w * 0.5)
         half_h = max(1.0, frame_h * 0.5)
-        frame_cx = frame_w * 0.5
-        frame_cy = frame_h * 0.5
+        frame_cx = frame_w * 0.5 + self.sys_cfg.offsets.horizontal_offset_norm * half_w
+        frame_cy = frame_h * 0.5 + self.sys_cfg.offsets.vertical_offset_norm * half_h
 
-        # Lead aim point in pixels
-        aim_x = self._smoothed_cx + self._vx * c.lead_s
-        aim_y = self._smoothed_cy + self._vy * c.lead_s
+        # Aim point normalized relative to offset frame center
+        nx = clamp((traj.aim_cx - frame_cx) / half_w, -1.0, 1.0)
+        ny = clamp((traj.aim_cy - frame_cy) / half_h, -1.0, 1.0)
 
-        nx = _clamp((aim_x - frame_cx) / half_w, -1.0, 1.0)
-        ny = _clamp((aim_y - frame_cy) / half_h, -1.0, 1.0)
+        # PID calculations
+        yaw_res = self.yaw_pid.update(nx, dt, deadzone=c.deadzone_norm, expo=c.expo)
+        alt_res = self.altitude_pid.update(ny, dt, deadzone=c.deadzone_norm, expo=c.expo)
 
-        if not self._has_prev:
-            self._prev_nx, self._prev_ny = nx, ny
-            self._has_prev = True
+        yaw_off = c.yaw_dir * yaw_res.output
+        pitch_off = c.pitch_dir * alt_res.output + dist_est.recommended_pitch_offset
+        roll_off = 0.0
 
-        yaw_off, self._ix, self._dn_x = self._axis_pid(
-            nx, self._ix, self._prev_nx, self._dn_x,
-            c.yaw_kp, c.yaw_ki, c.yaw_kd, dt, c.yaw_dir, c.max_yaw,
-        )
-        pitch_off, self._iy, self._dn_y = self._axis_pid(
-            ny, self._iy, self._prev_ny, self._dn_y,
-            c.pitch_kp, c.pitch_ki, c.pitch_kd, dt, c.pitch_dir, c.max_pitch,
-        )
-
-        if c.use_roll:
-            roll_off, _, _ = self._axis_pid(
-                nx, 0.0, self._prev_nx, 0.0,
-                c.roll_kp * c.roll_blend, 0.0, c.roll_kd * c.roll_blend,
-                dt, c.roll_dir, c.max_roll,
-            )
-        else:
-            roll_off = 0.0
-
-        self._prev_nx, self._prev_ny = nx, ny
-
-        # Output EMA
-        oa = c.out_alpha
-        self._out_yaw = oa * yaw_off + (1.0 - oa) * self._out_yaw
-        self._out_pitch = oa * pitch_off + (1.0 - oa) * self._out_pitch
-        self._out_roll = oa * roll_off + (1.0 - oa) * self._out_roll
-
-        target_yaw = c.rc_mid + self._out_yaw
-        target_pitch = c.rc_mid + self._out_pitch
-        target_roll = c.rc_mid + self._out_roll
+        target_yaw = c.rc_mid + yaw_off
+        target_pitch = c.rc_mid + pitch_off
+        target_roll = c.rc_mid + roll_off
 
         def slew(cur: float, tgt: float, rate: float) -> float:
             step = rate * dt
-            return cur + _clamp(tgt - cur, -step, step)
+            return cur + clamp(tgt - cur, -step, step)
 
-        self._cmd_yaw = slew(self._cmd_yaw, target_yaw, c.slew_yaw)
-        self._cmd_pitch = slew(self._cmd_pitch, target_pitch, c.slew_pitch)
+        self._cmd_yaw = slew(self._cmd_yaw, target_yaw, self.sys_cfg.safety.max_yaw_rate)
+        self._cmd_pitch = slew(self._cmd_pitch, target_pitch, self.sys_cfg.safety.max_climb_rate)
         self._cmd_roll = slew(self._cmd_roll, target_roll, c.slew_roll)
 
-        roll = int(_clamp(self._cmd_roll, c.rc_min, c.rc_max))
-        pitch = int(_clamp(self._cmd_pitch, c.rc_min, c.rc_max))
-        yaw = int(_clamp(self._cmd_yaw, c.rc_min, c.rc_max))
+        roll = int(clamp(self._cmd_roll, c.rc_min, c.rc_max))
+        pitch = int(clamp(self._cmd_pitch, c.rc_min, c.rc_max))
+        yaw = int(clamp(self._cmd_yaw, c.rc_min, c.rc_max))
         return roll, pitch, yaw
 
     def fade_to_mid(self, factor: float = 0.88) -> tuple[int, int, int]:
-        """Gently return sticks to mid (track loss / disable)."""
         c = self.cfg
         self._cmd_roll = c.rc_mid + (self._cmd_roll - c.rc_mid) * factor
         self._cmd_pitch = c.rc_mid + (self._cmd_pitch - c.rc_mid) * factor
         self._cmd_yaw = c.rc_mid + (self._cmd_yaw - c.rc_mid) * factor
-        self._out_roll *= factor
-        self._out_pitch *= factor
-        self._out_yaw *= factor
-        self._ix *= factor
-        self._iy *= factor
         return (
-            int(_clamp(self._cmd_roll, c.rc_min, c.rc_max)),
-            int(_clamp(self._cmd_pitch, c.rc_min, c.rc_max)),
-            int(_clamp(self._cmd_yaw, c.rc_min, c.rc_max)),
+            int(clamp(self._cmd_roll, c.rc_min, c.rc_max)),
+            int(clamp(self._cmd_pitch, c.rc_min, c.rc_max)),
+            int(clamp(self._cmd_yaw, c.rc_min, c.rc_max)),
         )

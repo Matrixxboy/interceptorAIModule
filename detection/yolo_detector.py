@@ -119,24 +119,33 @@ class YOLODetector:
         return self._names
 
     def _infer_kwargs(self) -> dict:
-        return dict(
+        kwargs = dict(
             imgsz=self.cfg.imgsz,
             conf=self.cfg.conf_threshold,
             iou=self.cfg.iou_threshold,
             max_det=self.cfg.max_det,
             device=self.device,
-            half=self.half,
             augment=self.cfg.augment,
             verbose=False,
         )
+        return kwargs
 
     def detect(self, frame: np.ndarray) -> list[BBox]:
         assert self._model is not None
-        results = self._model.predict(
-            source=frame,
-            stream=False,
-            **self._infer_kwargs(),
-        )
+        try:
+            import torch
+            with torch.inference_mode():
+                results = self._model.predict(
+                    source=frame,
+                    stream=False,
+                    **self._infer_kwargs(),
+                )
+        except ImportError:
+            results = self._model.predict(
+                source=frame,
+                stream=False,
+                **self._infer_kwargs(),
+            )
         return self._parse(results, frame.shape)
 
     def track(self, frame: np.ndarray, tracker_yaml: str = "bytetrack.yaml") -> list[BBox]:
