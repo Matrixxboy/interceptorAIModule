@@ -220,7 +220,7 @@ class CalibrationApp:
         row = ttk.Frame(linkf, style="Card.TFrame")
         row.pack(fill=tk.X, pady=(6, 0))
         ttk.Label(row, text="COM port", style="Card.TLabel").pack(side=tk.LEFT)
-        self.port_var = tk.StringVar(value=str(self.calib.get("control_port", "COM5")))
+        self.port_var = tk.StringVar(value=str(self.calib.get("control_port", "COM4")))
         ttk.Entry(row, textvariable=self.port_var, width=10).pack(side=tk.RIGHT)
 
         rowb = ttk.Frame(linkf, style="Card.TFrame")
@@ -761,7 +761,7 @@ class CalibrationApp:
     # ======================================================== save/load
     def save(self) -> None:
         self.calib["camera_index"] = int(self.cam_var.get())
-        self.calib["control_port"] = str(self.port_var.get()).strip() or "COM5"
+        self.calib["control_port"] = str(self.port_var.get()).strip() or "COM4"
         self.calib["tracker_type"] = self.tracker_var.get().upper()
         path = save_calibration(self.calib)
         self._set_status(f"Saved → {path}")
@@ -770,7 +770,7 @@ class CalibrationApp:
     def reload(self) -> None:
         self.calib = load_calibration()
         self.cam_var.set(int(self.calib["camera_index"]))
-        self.port_var.set(str(self.calib.get("control_port", "COM5")))
+        self.port_var.set(str(self.calib.get("control_port", "COM4")))
         self.tracker_var.set(str(self.calib.get("tracker_type", "CSRT")))
         self._rebuild_controller()
         self._set_status("Reloaded calibration.json")
@@ -780,7 +780,7 @@ class CalibrationApp:
             return
         self.calib = default_calibration()
         self.cam_var.set(int(self.calib["camera_index"]))
-        self.port_var.set(str(self.calib.get("control_port", "COM5")))
+        self.port_var.set(str(self.calib.get("control_port", "COM4")))
         self.tracker_var.set("CSRT")
         self._nudge_us = NUDGE_US
         self._rebuild_controller()

@@ -74,7 +74,7 @@ MSP receiver / override must accept `MSP_SET_RAW_RC` from the PC link you use.
 ### Wire check
 
 1. Connect FC USB (or UART↔USB) → note COM port in Device Manager  
-2. Set `CONTROL_PORT` in `main.py` (default `"COM5"`)  
+2. Set `CONTROL_PORT` in `main.py` (default `"COM4"`)  
 3. Set `CONTROL_BAUD` to match the MSP UART (often `57600` or `115200`)  
 4. Set `CAMERA_INDEX` (`0`, `1`, …) until the preview is correct  
 
