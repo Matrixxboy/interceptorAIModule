@@ -1,8 +1,9 @@
 """
-Autonomous FPV Drone Tracking System Application Entry Point.
+Arjuna — AI-Powered Autonomous Target Tracking & Drone Control Platform.
 
-Runs the real-time PyQt6 GUI Dashboard by default.
+Runs the Arjuna GCS (PyQt6) by default.
 Supports --cli flag for headless / OpenCV bench mode.
+Supports --legacy flag for the previous main window layout.
 """
 
 from __future__ import annotations
@@ -21,13 +22,21 @@ if ROOT not in sys.path:
 from config import SystemConfig
 
 
-def run_gui(cfg: SystemConfig) -> None:
+def run_gui(cfg: SystemConfig, legacy: bool = False) -> None:
     try:
         from PyQt6.QtWidgets import QApplication
-        from gui.main_window import MainWindow
 
         app = QApplication(sys.argv)
-        window = MainWindow(cfg)
+        app.setApplicationName("Arjuna")
+        app.setOrganizationName("Arjuna GCS")
+
+        if legacy:
+            from gui.main_window import MainWindow
+            window = MainWindow(cfg)
+        else:
+            from gui.arjuna_shell import ArjunaShell
+            window = ArjunaShell(cfg)
+
         window.show()
         sys.exit(app.exec())
     except Exception as e:
@@ -92,8 +101,9 @@ def run_cli(cfg: SystemConfig) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Autonomous FPV Drone Tracking System")
+    parser = argparse.ArgumentParser(description="Arjuna — AI Target Tracking & Drone Control GCS")
     parser.add_argument("--cli", action="store_true", help="Run in OpenCV CLI mode instead of PyQt6 GUI")
+    parser.add_argument("--legacy", action="store_true", help="Use legacy main window layout")
     parser.add_argument("--config", type=str, default=None, help="Path to JSON configuration preset")
     args = parser.parse_args()
 
@@ -104,7 +114,7 @@ def main() -> None:
     if args.cli:
         run_cli(cfg)
     else:
-        run_gui(cfg)
+        run_gui(cfg, legacy=args.legacy)
 
 
 if __name__ == "__main__":

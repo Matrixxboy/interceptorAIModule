@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 from PyQt6.QtCore import QPoint, QRect, Qt, pyqtSignal
 from PyQt6.QtGui import QImage, QMouseEvent, QPainter, QPen, QPixmap
-from PyQt6.QtWidgets import QLabel, QWidget
+from PyQt6.QtWidgets import QLabel, QSizePolicy, QWidget
 
 
 class VideoDisplayWidget(QLabel):
@@ -15,9 +15,15 @@ class VideoDisplayWidget(QLabel):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setMinimumSize(640, 360)
+        self.setObjectName("videoSurface")
+        self.setMinimumSize(400, 240)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setStyleSheet("background-color: #020617; border: 1px solid #1e293b;")
+        self.setStyleSheet(
+            "QLabel#videoSurface {"
+            "background-color: #02060c; border: 1px solid #152033; border-radius: 2px;"
+            "}"
+        )
 
         self.dragging = False
         self.start_point = QPoint()

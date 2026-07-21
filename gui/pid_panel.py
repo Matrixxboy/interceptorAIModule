@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
-    QHBoxLayout,
-    QLabel,
-    QSlider,
+    QSizePolicy,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -28,39 +26,30 @@ class SinglePIDGroup(QGroupBox):
 
     def _init_ui(self, max_kp: float) -> None:
         layout = QFormLayout(self)
+        layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+        layout.setContentsMargins(8, 12, 8, 8)
+        layout.setSpacing(8)
 
-        # Kp
-        self.sp_kp = QDoubleSpinBox()
-        self.sp_kp.setRange(0.0, max_kp)
-        self.sp_kp.setSingleStep(5.0)
-        self.sp_kp.setValue(self.cfg.kp)
-        self.sp_kp.valueChanged.connect(self._on_change)
+        def _spin(value: float, lo: float, hi: float, step: float) -> QDoubleSpinBox:
+            sp = QDoubleSpinBox()
+            sp.setRange(lo, hi)
+            sp.setSingleStep(step)
+            sp.setValue(value)
+            sp.setMinimumWidth(100)
+            sp.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            sp.valueChanged.connect(self._on_change)
+            return sp
 
-        # Ki
-        self.sp_ki = QDoubleSpinBox()
-        self.sp_ki.setRange(0.0, 500.0)
-        self.sp_ki.setSingleStep(1.0)
-        self.sp_ki.setValue(self.cfg.ki)
-        self.sp_ki.valueChanged.connect(self._on_change)
+        self.sp_kp = _spin(self.cfg.kp, 0.0, max_kp, 5.0)
+        self.sp_ki = _spin(self.cfg.ki, 0.0, 500.0, 1.0)
+        self.sp_kd = _spin(self.cfg.kd, 0.0, 500.0, 1.0)
+        self.sp_max = _spin(self.cfg.max_output, 10.0, 500.0, 10.0)
 
-        # Kd
-        self.sp_kd = QDoubleSpinBox()
-        self.sp_kd.setRange(0.0, 500.0)
-        self.sp_kd.setSingleStep(1.0)
-        self.sp_kd.setValue(self.cfg.kd)
-        self.sp_kd.valueChanged.connect(self._on_change)
-
-        # Max Output
-        self.sp_max = QDoubleSpinBox()
-        self.sp_max.setRange(10.0, 500.0)
-        self.sp_max.setSingleStep(10.0)
-        self.sp_max.setValue(self.cfg.max_output)
-        self.sp_max.valueChanged.connect(self._on_change)
-
-        layout.addRow("Kp (Proportional):", self.sp_kp)
-        layout.addRow("Ki (Integral):", self.sp_ki)
-        layout.addRow("Kd (Derivative):", self.sp_kd)
-        layout.addRow("Max Stick Output (µs):", self.sp_max)
+        layout.addRow("Kp", self.sp_kp)
+        layout.addRow("Ki", self.sp_ki)
+        layout.addRow("Kd", self.sp_kd)
+        layout.addRow("Max (µs)", self.sp_max)
 
     def _on_change(self) -> None:
         self.cfg.kp = self.sp_kp.value()
