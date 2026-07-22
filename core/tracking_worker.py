@@ -11,7 +11,8 @@ from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
 from config import SystemConfig
 from control.fpv_follow import FPVFollowController
-from control.msp_link import build_msp_set_raw_rc, make_rc_channels
+from plugins.flight_controllers.mavlink_controller import MAVLinkController
+from plugins.flight_controllers.msp_controller import MSPController
 from database.target_profile import TargetProfile, TargetStatus
 from database.target_store import TargetStore
 from detection.hybrid_tracker import HybridYoloLockTracker
@@ -26,10 +27,8 @@ def list_camera_devices(max_test: int = 6) -> list[tuple[int, str]]:
     for idx in range(max_test):
         cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
         if cap.isOpened():
-            ok, _ = cap.read()
             cap.release()
-            label = f"Camera {idx} (Capture Card / Video Input)" if ok else f"Camera {idx}"
-            devices.append((idx, label))
+            devices.append((idx, f"Camera {idx}"))
     if not devices:
         devices.append((0, "Default Camera 0 (Synthetic Mode)"))
     return devices
@@ -55,7 +54,7 @@ class TrackingWorkerThread(QThread):
         self.arm_requested = False
         self.mode_requested = False
 
-        self.serial_link: serial.Serial | None = None
+        self.fc = MAVLinkController()
         self.is_connected = False
         self.port_name = ""
         self.baud_rate = 115200
@@ -89,39 +88,57 @@ class TrackingWorkerThread(QThread):
 
     def connect_serial(self, port_name: str, baud_rate: int = 115200) -> tuple[bool, str]:
         self.disconnect_serial()
+
+        # Attempt 1: Try MSPController (for Betaflight / INAV / MSP)
         try:
-            self.serial_link = serial.Serial(port_name, baud_rate, timeout=0.02)
-            time.sleep(0.5)
-            self.is_connected = True
-            self.port_name = port_name
-            self.baud_rate = baud_rate
-            self.sys_log.log(
-                LogCategory.DRONE,
-                f"Connected to {port_name} @ {baud_rate}",
-                module="MSP Link",
-            )
-            return True, f"Connected to {port_name} @ {baud_rate}"
+            msp = MSPController(port=port_name, baudrate=baud_rate)
+            if msp.connect():
+                self.fc = msp
+                self.is_connected = True
+                self.port_name = port_name
+                self.baud_rate = baud_rate
+                self.sys_log.log(
+                    LogCategory.DRONE,
+                    f"Connected to {port_name} @ {baud_rate} (MSP)",
+                    module="MSP Link",
+                )
+                return True, f"Connected to {port_name} @ {baud_rate} (MSP)"
         except Exception as e:
-            self.is_connected = False
-            self.serial_link = None
             self.sys_log.log(
                 LogCategory.DRONE,
-                f"Connection failed: {e}",
-                severity=LogSeverity.ERROR,
-                module="MSP Link",
+                f"MSP connection attempt on {port_name} failed: {e}",
+                severity=LogSeverity.WARNING,
+                module="FC Link",
             )
-            return False, f"Could not open {port_name}: {e}"
+
+        # Attempt 2: Try MAVLinkController (for ArduPilot / PX4 / MAVLink)
+        try:
+            mav = MAVLinkController(connection_string=port_name, baudrate=baud_rate)
+            if mav.connect():
+                self.fc = mav
+                self.is_connected = True
+                self.port_name = port_name
+                self.baud_rate = baud_rate
+                self.sys_log.log(
+                    LogCategory.DRONE,
+                    f"Connected to {port_name} @ {baud_rate} (MAVLink)",
+                    module="MAVLink Link",
+                )
+                return True, f"Connected to {port_name} @ {baud_rate} (MAVLink)"
+        except Exception as e:
+            self.sys_log.log(
+                LogCategory.DRONE,
+                f"MAVLink connection attempt on {port_name} failed: {e}",
+                severity=LogSeverity.ERROR,
+                module="FC Link",
+            )
+
+        self.is_connected = False
+        return False, f"Could not connect to flight controller on {port_name}"
 
     def disconnect_serial(self) -> None:
-        if self.serial_link is not None and self.serial_link.is_open:
-            try:
-                neutral_ch = make_rc_channels(1500, 1500, 1500, 1000, arm=False, flight_mode=False)
-                packet = build_msp_set_raw_rc(neutral_ch)
-                self.serial_link.write(packet)
-                self.serial_link.close()
-            except Exception:
-                pass
-        self.serial_link = None
+        if hasattr(self, 'fc') and self.fc.is_connected():
+            self.fc.disconnect()
         self.is_connected = False
 
     def update_config(self, cfg: SystemConfig) -> None:
@@ -176,14 +193,19 @@ class TrackingWorkerThread(QThread):
         for backend in [cv2.CAP_DSHOW, cv2.CAP_MSMF]:
             cap = cv2.VideoCapture(cam_idx, backend)
             if cap.isOpened():
+                # Set MJPG FOURCC for USB capture cards
                 cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.sys_config.camera.frame_width)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.sys_config.camera.frame_height)
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                
+                # Check if we can read with MJPG
                 ok, frame = cap.read()
                 if ok and frame is not None:
                     self.active_cam_idx = cam_idx
                     return cap
+                    
+                # If setting properties broke it, try opening it raw
                 cap.release()
                 cap = cv2.VideoCapture(cam_idx, backend)
                 if cap.isOpened():
@@ -191,7 +213,7 @@ class TrackingWorkerThread(QThread):
                     if ok and frame is not None:
                         self.active_cam_idx = cam_idx
                         return cap
-                    cap.release()
+                cap.release()
         return None
 
     def run(self) -> None:
@@ -343,20 +365,15 @@ class TrackingWorkerThread(QThread):
 
             if now - last_msp_send >= msp_interval:
                 last_msp_send = now
-                rc_channels = make_rc_channels(
-                    roll=roll,
-                    pitch=pitch,
-                    yaw=yaw,
-                    throttle=1000,
-                    arm=self.arm_requested,
-                    flight_mode=self.mode_requested or self.arm_requested,
-                )
-                if self.is_connected and self.serial_link is not None and self.serial_link.is_open:
-                    try:
-                        packet = build_msp_set_raw_rc(rc_channels)
-                        self.serial_link.write(packet)
-                    except Exception:
-                        self.is_connected = False
+                if self.is_connected and self.fc.is_connected():
+                    # Handle arm state
+                    if self.arm_requested != getattr(self.fc, '_armed', False):
+                        if self.arm_requested:
+                            self.fc.arm()
+                        else:
+                            self.fc.disarm()
+                    
+                    self.fc.send_control(roll=roll, pitch=pitch, yaw=yaw, throttle=1000)
 
             self._render_hud(frame, locked, bbox, conf, source, safety_state, roll, pitch, yaw, dist_m, w, h)
 

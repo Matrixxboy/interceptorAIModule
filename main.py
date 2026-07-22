@@ -15,9 +15,10 @@ import sys
 os.environ["OPENCV_LOG_LEVEL"] = "OFF"
 os.environ["OPENCV_VIDEOINPUT_MSMF_ENABLE_HW_TRANSFORMS"] = "0"
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
-if ROOT not in sys.path:
-    sys.path.insert(0, ROOT)
+from paths import BUNDLE_DIR, ROOT
+
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from config import SystemConfig
 

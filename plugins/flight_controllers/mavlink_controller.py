@@ -2,6 +2,7 @@ import logging
 import time
 from typing import Dict, Any
 from interfaces.flight_controller import FlightController
+from sys_logging.system_logger import SystemLogger, LogCategory
 
 try:
     from pymavlink import mavutil
@@ -17,7 +18,9 @@ class MAVLinkController(FlightController):
         self.baudrate = baudrate
         self.master = None
         self.logger = logging.getLogger("MAVLinkController")
+        self.sys_log = SystemLogger()
         self._armed = False
+        self._last_log_time = 0.0
 
     def connect(self) -> bool:
         if mavutil is None:
@@ -26,8 +29,11 @@ class MAVLinkController(FlightController):
             
         try:
             self.master = mavutil.mavlink_connection(self.connection_string, baud=self.baudrate)
-            self.master.wait_heartbeat(timeout=5)
-            self.logger.info(f"Connected to MAVLink vehicle at {self.connection_string}")
+            hb = self.master.wait_heartbeat(timeout=3)
+            if hb is not None:
+                self.logger.info(f"Connected to MAVLink vehicle at {self.connection_string} (Sys {self.master.target_system}, Comp {self.master.target_component})")
+            else:
+                self.logger.warning(f"No initial MAVLink heartbeat on {self.connection_string}, port opened.")
             return True
         except Exception as e:
             self.logger.error(f"Failed to connect to MAVLink vehicle: {e}")
@@ -52,7 +58,7 @@ class MAVLinkController(FlightController):
             mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0,
             1, 0, 0, 0, 0, 0, 0
         )
-        self.logger.info("Sent MAVLink ARM command.")
+        self.sys_log.log(LogCategory.DRONE, "Sent MAVLink ARM command (MAV_CMD)", module="MAVLink")
         self._armed = True
         return True
 
@@ -65,7 +71,7 @@ class MAVLinkController(FlightController):
             mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0,
             0, 0, 0, 0, 0, 0, 0
         )
-        self.logger.info("Sent MAVLink DISARM command.")
+        self.sys_log.log(LogCategory.DRONE, "Sent MAVLink DISARM command (MAV_CMD)", module="MAVLink")
         self._armed = False
         return True
 
@@ -74,10 +80,26 @@ class MAVLinkController(FlightController):
             return
             
         # Send RC Override
+        # Channel map (AETR): 1=Roll, 2=Pitch, 3=Throttle, 4=Yaw
+        # AUX1 (Ch 5) = Arm switch (2000 = Arm, 1000 = Disarm)
+        # AUX2 (Ch 6) = Flight Mode switch (1000 = Angle Mode, 2000 = Acro Mode)
+        ch5 = 2000 if self._armed else 1000
+        ch6 = 1000 # Force Angle Mode for stable autonomous tracking
+        
+        # 65535 prevents RC Failsafe on unused channels
         self.master.mav.rc_channels_override_send(
             self.master.target_system, self.master.target_component,
-            roll, pitch, throttle, yaw, 0, 0, 0, 0
+            roll, pitch, throttle, yaw, ch5, ch6, 65535, 65535
         )
+        
+        now = time.time()
+        if now - self._last_log_time >= 1.0:
+            self.sys_log.log(
+                LogCategory.DRONE,
+                f"MAVLink RC sent: R{roll} P{pitch} Y{yaw} T{throttle} | AUX1(Arm):{ch5} AUX2(Mode):{ch6}",
+                module="MAVLink"
+            )
+            self._last_log_time = now
 
     def get_telemetry(self) -> Dict[str, Any]:
         telemetry = {}
@@ -85,8 +107,12 @@ class MAVLinkController(FlightController):
             return telemetry
             
         try:
-            msg = self.master.recv_match(type=['ATTITUDE', 'VFR_HUD', 'HEARTBEAT'], blocking=False)
-            if msg:
+            # Drain all pending messages so we don't lag behind
+            while True:
+                msg = self.master.recv_match(type=['ATTITUDE', 'VFR_HUD', 'HEARTBEAT'], blocking=False)
+                if not msg:
+                    break
+                
                 msg_type = msg.get_type()
                 if msg_type == 'ATTITUDE':
                     telemetry['roll_deg'] = msg.roll * 57.2958

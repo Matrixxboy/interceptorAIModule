@@ -9,8 +9,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-LOGS_DIR = Path(__file__).resolve().parent.parent / "logs"
-LOGS_DIR.mkdir(exist_ok=True, parents=True)
+from paths import LOGS_DIR
 
 
 @dataclass

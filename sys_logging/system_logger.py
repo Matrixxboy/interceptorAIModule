@@ -11,8 +11,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
 
-LOGS_DIR = Path(__file__).resolve().parent.parent / "logs"
-LOGS_DIR.mkdir(exist_ok=True, parents=True)
+from paths import LOGS_DIR
 
 
 class LogSeverity(str, Enum):

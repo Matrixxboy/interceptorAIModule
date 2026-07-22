@@ -9,8 +9,9 @@ class ConfigManager:
     Supports loading, saving, and managing configuration profiles.
     """
     
-    def __init__(self, config_dir: str = "config"):
-        self.config_dir = config_dir
+    def __init__(self, config_dir: str | None = None):
+        from paths import CONFIGS_DIR
+        self.config_dir = str(CONFIGS_DIR) if config_dir is None or config_dir == "config" else config_dir
         self.active_profile_name = "default"
         self.config: Dict[str, Any] = {}
         self.logger = logging.getLogger("ConfigManager")

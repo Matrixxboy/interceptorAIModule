@@ -7,8 +7,9 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_PATH = ROOT / "calibration.json"
+from paths import CALIBRATION_FILE, DEFAULT_CALIBRATION_FILE, ROOT
+
+DEFAULT_PATH = CALIBRATION_FILE
 
 DEFAULT_CALIB: dict[str, Any] = {
     "camera_index": 1,
@@ -65,12 +66,18 @@ def default_calibration() -> dict[str, Any]:
 
 def load_calibration(path: Path | str | None = None) -> dict[str, Any]:
     """Load calibration JSON; merge over defaults so new keys always exist."""
-    path = Path(path) if path else DEFAULT_PATH
+    if path is not None:
+        p = Path(path)
+    elif CALIBRATION_FILE.is_file():
+        p = CALIBRATION_FILE
+    else:
+        p = DEFAULT_CALIBRATION_FILE
+
     data = default_calibration()
-    if not path.is_file():
+    if not p.is_file():
         return data
     try:
-        with path.open("r", encoding="utf-8") as f:
+        with p.open("r", encoding="utf-8") as f:
             loaded = json.load(f)
     except (OSError, json.JSONDecodeError):
         return data
@@ -84,7 +91,7 @@ def load_calibration(path: Path | str | None = None) -> dict[str, Any]:
 
 
 def save_calibration(data: dict[str, Any], path: Path | str | None = None) -> Path:
-    path = Path(path) if path else DEFAULT_PATH
+    path = Path(path) if path else CALIBRATION_FILE
     merged = default_calibration()
     for key, value in data.items():
         if key == "fpv" and isinstance(value, dict):

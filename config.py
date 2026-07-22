@@ -7,10 +7,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Sequence
 
-ROOT = Path(__file__).resolve().parent
-MODELS_DIR = ROOT / "models"
-PRESETS_DIR = ROOT / "presets"
-PRESETS_DIR.mkdir(exist_ok=True, parents=True)
+from paths import BUNDLE_DIR, DATA_DIR, LOGS_DIR, MODELS_DIR, PRESETS_DIR, ROOT
 
 # Open-vocab prompts (used when detection.mode = "world")
 AERIAL_THREAT_CLASSES: tuple[str, ...] = (

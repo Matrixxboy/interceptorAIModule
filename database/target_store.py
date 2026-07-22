@@ -12,8 +12,8 @@ import cv2
 import numpy as np
 
 from database.target_profile import TargetProfile, TargetStatus
+from paths import DATA_DIR
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 TARGETS_DIR = DATA_DIR / "targets"
 TARGETS_DIR.mkdir(parents=True, exist_ok=True)
 

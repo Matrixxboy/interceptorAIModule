@@ -81,6 +81,9 @@ class HybridYoloLockTracker:
         self._frame_i = 0
         self._lost = 0
         self._last_dets: list[BBox] = []
+        
+        # Load YOLO model at startup
+        self.ensure_detector()
 
     def ensure_detector(self) -> YOLODetector:
         if self.detector is None:

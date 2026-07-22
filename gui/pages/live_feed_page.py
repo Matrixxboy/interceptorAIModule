@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, pyqtSlot
+from typing import Any
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot
 from PyQt6.QtWidgets import (
     QComboBox,
     QFrame,
@@ -23,6 +24,20 @@ from PyQt6.QtWidgets import (
 from config import SystemConfig
 from control.msp_link import list_serial_ports
 from core.tracking_worker import TrackingWorkerThread, list_camera_devices
+
+
+class ConnectionWorker(QThread):
+    finished_signal = pyqtSignal(bool, str, str)
+
+    def __init__(self, worker: Any, port: str, baud: int) -> None:
+        super().__init__()
+        self.worker = worker
+        self.port = port
+        self.baud = baud
+
+    def run(self) -> None:
+        ok, msg = self.worker.connect_serial(self.port, self.baud)
+        self.finished_signal.emit(ok, msg, str(self.port))
 from gui.image_processing_widget import ImageProcessingWidget
 from gui.parameters_panel import ParametersPanel
 from gui.pid_panel import PIDTuningPanel
@@ -106,9 +121,9 @@ class LiveFeedPage(QWidget):
         self.combo_baud.setMaximumWidth(120)
         msp_grid.addWidget(self.combo_baud, 0, 3)
 
-        btn_refresh_ports = QPushButton("Ports")
+        btn_refresh_ports = QPushButton("Refresh Ports")
         btn_refresh_ports.setObjectName("btnGhost")
-        btn_refresh_ports.setMinimumWidth(70)
+        btn_refresh_ports.setMinimumWidth(100)
         btn_refresh_ports.clicked.connect(self._refresh_serial_ports)
         msp_grid.addWidget(btn_refresh_ports, 0, 4)
 
@@ -308,6 +323,7 @@ class LiveFeedPage(QWidget):
         if self.worker.is_connected:
             self.worker.disconnect_serial()
             self.btn_connect.setText("Connect")
+            self.btn_connect.setEnabled(True)
             self.lbl_serial_status.set_status("OFFLINE", "error")
         else:
             port = self.combo_ports.currentData()
@@ -315,14 +331,25 @@ class LiveFeedPage(QWidget):
             if not port:
                 QMessageBox.warning(self, "Serial", "No port selected.")
                 return
-            ok, msg = self.worker.connect_serial(port, baud)
-            if ok:
-                self.btn_connect.setText("Disconnect")
-                short = port if len(str(port)) <= 8 else str(port)[:8]
-                self.lbl_serial_status.set_status(f"ON {short}", "ok")
-            else:
-                QMessageBox.critical(self, "Serial Error", msg)
-                self.lbl_serial_status.set_status("ERROR", "error")
+
+            self.btn_connect.setText("Connecting...")
+            self.btn_connect.setEnabled(False)
+            self.lbl_serial_status.set_status("CONNECTING...", "warn")
+
+            self._conn_thread = ConnectionWorker(self.worker, port, baud)
+            self._conn_thread.finished_signal.connect(self._on_connection_finished)
+            self._conn_thread.start()
+
+    def _on_connection_finished(self, ok: bool, msg: str, port: str) -> None:
+        self.btn_connect.setEnabled(True)
+        if ok:
+            self.btn_connect.setText("Disconnect")
+            short = port if len(port) <= 8 else port[:8]
+            self.lbl_serial_status.set_status(f"CONNECTED ({short})", "ok")
+        else:
+            self.btn_connect.setText("Connect")
+            self.lbl_serial_status.set_status("ERROR", "error")
+            QMessageBox.critical(self, "Serial Error", msg)
 
     @pyqtSlot(int, int, int, int)
     def _on_roi_selected(self, x: int, y: int, w: int, h: int) -> None:

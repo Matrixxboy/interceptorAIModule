@@ -7,8 +7,9 @@ import os
 os.environ["OPENCV_LOG_LEVEL"] = "OFF"
 os.environ["OPENCV_VIDEOINPUT_MSMF_ENABLE_HW_TRANSFORMS"] = "0"
 
+from typing import Any
 import numpy as np
-from PyQt6.QtCore import Qt, pyqtSlot
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -28,6 +29,20 @@ from PyQt6.QtWidgets import (
 )
 
 from config import SystemConfig
+
+
+class MainWindowConnectionWorker(QThread):
+    finished_signal = pyqtSignal(bool, str, str)
+
+    def __init__(self, worker: Any, port: str, baud: int) -> None:
+        super().__init__()
+        self.worker = worker
+        self.port = port
+        self.baud = baud
+
+    def run(self) -> None:
+        ok, msg = self.worker.connect_serial(self.port, self.baud)
+        self.finished_signal.emit(ok, msg, str(self.port))
 from control.msp_link import list_serial_ports
 from core.tracking_worker import TrackingWorkerThread, list_camera_devices
 from gui.image_processing_widget import ImageProcessingWidget
@@ -222,6 +237,7 @@ class MainWindow(QMainWindow):
         if self.worker.is_connected:
             self.worker.disconnect_serial()
             self.btn_connect.setText("Connect Serial")
+            self.btn_connect.setEnabled(True)
             self.lbl_serial_status.setText("DISCONNECTED")
             self.lbl_serial_status.setStyleSheet("color: #ef4444; font-weight: bold; padding: 4px 8px;")
             self.statusBar().showMessage("Serial port disconnected.")
@@ -232,16 +248,27 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Serial Connection", "No valid COM port selected.")
                 return
 
-            ok, msg = self.worker.connect_serial(port, baud)
-            if ok:
-                self.btn_connect.setText("Disconnect")
-                self.lbl_serial_status.setText(f"CONNECTED ({port})")
-                self.lbl_serial_status.setStyleSheet("color: #22c55e; font-weight: bold; padding: 4px 8px;")
-                self.statusBar().showMessage(msg)
-            else:
-                QMessageBox.critical(self, "Serial Connection Error", msg)
-                self.lbl_serial_status.setText("ERROR")
-                self.lbl_serial_status.setStyleSheet("color: #ef4444; font-weight: bold; padding: 4px 8px;")
+            self.btn_connect.setText("Connecting...")
+            self.btn_connect.setEnabled(False)
+            self.lbl_serial_status.setText("CONNECTING...")
+            self.lbl_serial_status.setStyleSheet("color: #eab308; font-weight: bold; padding: 4px 8px;")
+
+            self._conn_thread = MainWindowConnectionWorker(self.worker, port, baud)
+            self._conn_thread.finished_signal.connect(self._on_connection_finished)
+            self._conn_thread.start()
+
+    def _on_connection_finished(self, ok: bool, msg: str, port: str) -> None:
+        self.btn_connect.setEnabled(True)
+        if ok:
+            self.btn_connect.setText("Disconnect")
+            self.lbl_serial_status.setText(f"CONNECTED ({port})")
+            self.lbl_serial_status.setStyleSheet("color: #22c55e; font-weight: bold; padding: 4px 8px;")
+            self.statusBar().showMessage(msg)
+        else:
+            self.btn_connect.setText("Connect Serial")
+            self.lbl_serial_status.setText("ERROR")
+            self.lbl_serial_status.setStyleSheet("color: #ef4444; font-weight: bold; padding: 4px 8px;")
+            QMessageBox.critical(self, "Serial Connection Error", msg)
 
     @pyqtSlot(int, int, int, int)
     def _on_roi_selected(self, x: int, y: int, w: int, h: int) -> None:
