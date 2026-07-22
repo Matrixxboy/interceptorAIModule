@@ -6,17 +6,23 @@ from typing import Any
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot
 from PyQt6.QtWidgets import (
     QComboBox,
+    QDoubleSpinBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
+    QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSlider,
+    QSpinBox,
     QSplitter,
     QTabWidget,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -200,6 +206,43 @@ class LiveFeedPage(QWidget):
             ctrl_grid.setColumnStretch(c, 1)
         left_l.addWidget(ctrl_bar)
 
+        # --- Throttle & Hotkeys Bar ---
+        throttle_bar = self._toolbar_frame("MANUAL THROTTLE CONTROL (Hotkeys: U=+25 | J=-25 | A=ARM | X=DISARM | L=Lock | R=Reset)")
+        thr_grid = QGridLayout(throttle_bar)
+        thr_grid.setContentsMargins(10, 8, 10, 8)
+        thr_grid.setHorizontalSpacing(8)
+
+        self.lbl_throttle_val = QLabel("THROTTLE: 1000 µs")
+        self.lbl_throttle_val.setStyleSheet("color: #38bdf8; font-weight: bold; font-family: monospace; font-size: 10pt;")
+        thr_grid.addWidget(self.lbl_throttle_val, 0, 0)
+
+        self.slider_throttle = QSlider(Qt.Orientation.Horizontal)
+        self.slider_throttle.setRange(1000, 2000)
+        self.slider_throttle.setValue(1000)
+        self.slider_throttle.valueChanged.connect(self._on_slider_throttle_changed)
+        thr_grid.addWidget(self.slider_throttle, 0, 1)
+
+        btn_thr_up = QPushButton("+25 (U)")
+        btn_thr_up.setObjectName("btnGhost")
+        btn_thr_up.setMinimumWidth(75)
+        btn_thr_up.clicked.connect(lambda: self._adjust_throttle(25))
+        thr_grid.addWidget(btn_thr_up, 0, 2)
+
+        btn_thr_down = QPushButton("-25 (J)")
+        btn_thr_down.setObjectName("btnGhost")
+        btn_thr_down.setMinimumWidth(75)
+        btn_thr_down.clicked.connect(lambda: self._adjust_throttle(-25))
+        thr_grid.addWidget(btn_thr_down, 0, 3)
+
+        btn_thr_min = QPushButton("MIN 1000")
+        btn_thr_min.setObjectName("btnDanger")
+        btn_thr_min.setMinimumWidth(85)
+        btn_thr_min.clicked.connect(lambda: self._set_throttle(1000))
+        thr_grid.addWidget(btn_thr_min, 0, 4)
+
+        thr_grid.setColumnStretch(1, 1)
+        left_l.addWidget(throttle_bar)
+
         # --- Metrics ---
         metrics_bar = self._toolbar_frame("LIVE METRICS")
         m_layout = QHBoxLayout(metrics_bar)
@@ -350,6 +393,24 @@ class LiveFeedPage(QWidget):
             self.btn_connect.setText("Connect")
             self.lbl_serial_status.set_status("ERROR", "error")
             QMessageBox.critical(self, "Serial Error", msg)
+
+    def _adjust_throttle(self, delta: int) -> None:
+        thr = self.worker.adjust_throttle(delta)
+        self.update_throttle_ui(thr)
+
+    def _set_throttle(self, value: int) -> None:
+        thr = self.worker.set_throttle(value)
+        self.update_throttle_ui(thr)
+
+    def _on_slider_throttle_changed(self, value: int) -> None:
+        self.worker.set_throttle(value)
+        self.lbl_throttle_val.setText(f"THROTTLE: {value} µs")
+
+    def update_throttle_ui(self, value: int) -> None:
+        self.lbl_throttle_val.setText(f"THROTTLE: {value} µs")
+        self.slider_throttle.blockSignals(True)
+        self.slider_throttle.setValue(value)
+        self.slider_throttle.blockSignals(False)
 
     @pyqtSlot(int, int, int, int)
     def _on_roi_selected(self, x: int, y: int, w: int, h: int) -> None:

@@ -8,17 +8,24 @@ os.environ["OPENCV_LOG_LEVEL"] = "OFF"
 os.environ["OPENCV_VIDEOINPUT_MSMF_ENABLE_HW_TRANSFORMS"] = "0"
 
 from PyQt6.QtCore import Qt, pyqtSlot
+from PyQt6.QtGui import QKeyEvent
 from PyQt6.QtWidgets import (
+    QApplication,
+    QDoubleSpinBox,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QPlainTextEdit,
     QPushButton,
     QSizePolicy,
+    QSpinBox,
     QStackedWidget,
     QStatusBar,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -319,6 +326,71 @@ class ArjunaShell(QMainWindow):
 
         wizard = CalibrationWizard(ConfigManager(), parent=self)
         wizard.exec()
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        focus_widget = QApplication.focusWidget()
+        if focus_widget and isinstance(focus_widget, (QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox)):
+            super().keyPressEvent(event)
+            return
+
+        key = event.key()
+        text = event.text().upper()
+
+        if key == Qt.Key.Key_L or text == "L":
+            # L = start manual lock selection mode
+            if hasattr(self.page_live_feed, "video_widget"):
+                self.page_live_feed.video_widget.setFocus()
+            self.statusBar().showMessage("MANUAL LOCK MODE (Hotkey L): Drag box on video feed to lock target", 4000)
+            self.sys_log.log(LogCategory.SYSTEM, "Manual Lock Selection Mode activated (Hotkey L)", module="Hotkeys")
+        elif key == Qt.Key.Key_A or text == "A":
+            # A = arm
+            self.worker.arm_drone()
+            if hasattr(self.page_live_feed, "btn_arm"):
+                self.page_live_feed.btn_arm.setChecked(True)
+            self.statusBar().showMessage("DRONE ARMED (Hotkey A)", 4000)
+        elif key == Qt.Key.Key_X or text == "X":
+            # X = disarm
+            self.worker.disarm_drone()
+            if hasattr(self.page_live_feed, "btn_arm"):
+                self.page_live_feed.btn_arm.setChecked(False)
+            if hasattr(self.page_live_feed, "update_throttle_ui"):
+                self.page_live_feed.update_throttle_ui(1000)
+            self.statusBar().showMessage("DRONE DISARMED - Throttle reset to 1000 µs (Hotkey X)", 4000)
+        elif key == Qt.Key.Key_M or text == "M":
+            # M = toggle flight mode only
+            mode = self.worker.toggle_flight_mode()
+            self.statusBar().showMessage(f"FLIGHT MODE TOGGLED: {mode} (Hotkey M)", 4000)
+        elif key == Qt.Key.Key_U or text == "U":
+            # U = throttle +25
+            thr = self.worker.adjust_throttle(25)
+            if hasattr(self.page_live_feed, "update_throttle_ui"):
+                self.page_live_feed.update_throttle_ui(thr)
+            self.statusBar().showMessage(f"THROTTLE: {thr} µs (+25, Hotkey U)", 2000)
+        elif key == Qt.Key.Key_J or text == "J":
+            # J = throttle -25
+            thr = self.worker.adjust_throttle(-25)
+            if hasattr(self.page_live_feed, "update_throttle_ui"):
+                self.page_live_feed.update_throttle_ui(thr)
+            self.statusBar().showMessage(f"THROTTLE: {thr} µs (-25, Hotkey J)", 2000)
+        elif key == Qt.Key.Key_0 or text == "0":
+            # 0 = set flight mode to toggle angle mode and acro mode
+            mode = self.worker.toggle_flight_mode()
+            self.statusBar().showMessage(f"FLIGHT MODE: {mode} (Hotkey 0)", 4000)
+        elif key == Qt.Key.Key_R or text == "R":
+            # R = reset tracker
+            self.worker.reset_lock()
+            self.statusBar().showMessage("TRACKER RESET / UNLOCKED (Hotkey R)", 4000)
+        elif key == Qt.Key.Key_S or text == "S":
+            # S = check arm status
+            armed = getattr(self.worker, 'arm_requested', False)
+            thr = getattr(self.worker, 'throttle_value', 1000)
+            mode = getattr(self.worker, 'flight_mode', 'ANGLE')
+            fc_status = "CONNECTED" if self.worker.is_connected else "DISCONNECTED"
+            msg = f"STATUS CHECK: FC={fc_status} | ARM={'ARMED' if armed else 'DISARMED'} | Mode={mode} | Throttle={thr} µs"
+            self.statusBar().showMessage(msg, 6000)
+            self.sys_log.log(LogCategory.SYSTEM, msg, module="Status Check")
+        else:
+            super().keyPressEvent(event)
 
     def closeEvent(self, event) -> None:
         self.worker.stop()

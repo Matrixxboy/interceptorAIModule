@@ -76,6 +76,46 @@ class TrackingWorkerThread(QThread):
         self.active_target: TargetProfile | None = None
         self._was_locked = False
         self._fps_window: list[float] = []
+        self.throttle_value: int = 1000
+        self.flight_mode: str = "ANGLE"
+
+    def adjust_throttle(self, delta: int) -> int:
+        self.throttle_value = max(1000, min(2000, self.throttle_value + delta))
+        self.sys_log.log(
+            LogCategory.DRONE,
+            f"Throttle updated: {self.throttle_value} µs",
+            module="Manual Control",
+        )
+        return self.throttle_value
+
+    def set_throttle(self, value: int) -> int:
+        self.throttle_value = max(1000, min(2000, value))
+        self.sys_log.log(
+            LogCategory.DRONE,
+            f"Throttle set: {self.throttle_value} µs",
+            module="Manual Control",
+        )
+        return self.throttle_value
+
+    def toggle_flight_mode(self) -> str:
+        self.flight_mode = "ACRO" if self.flight_mode == "ANGLE" else "ANGLE"
+        self.sys_log.log(
+            LogCategory.DRONE,
+            f"Flight mode toggled to: {self.flight_mode}",
+            module="Manual Control",
+        )
+        return self.flight_mode
+
+    def arm_drone(self) -> bool:
+        self.arm_requested = True
+        self.sys_log.log(LogCategory.DRONE, "ARM requested", module="Manual Control")
+        return True
+
+    def disarm_drone(self) -> bool:
+        self.arm_requested = False
+        self.throttle_value = 1000  # Reset throttle to safety min on disarm
+        self.sys_log.log(LogCategory.DRONE, "DISARM requested (Throttle reset to 1000)", module="Manual Control")
+        return False
 
     @property
     def current_fps(self) -> float:
@@ -373,7 +413,7 @@ class TrackingWorkerThread(QThread):
                         else:
                             self.fc.disarm()
                     
-                    self.fc.send_control(roll=roll, pitch=pitch, yaw=yaw, throttle=1000)
+                    self.fc.send_control(roll=roll, pitch=pitch, yaw=yaw, throttle=self.throttle_value)
 
             self._render_hud(frame, locked, bbox, conf, source, safety_state, roll, pitch, yaw, dist_m, w, h)
 
@@ -397,7 +437,7 @@ class TrackingWorkerThread(QThread):
                 roll=roll,
                 pitch=pitch,
                 yaw=yaw,
-                throttle=1000,
+                throttle=self.throttle_value,
                 failsafe=safety_state.reason,
             )
 
