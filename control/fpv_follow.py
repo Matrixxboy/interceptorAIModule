@@ -92,6 +92,7 @@ class FPVFollowController:
         self._cmd_roll = float(c.rc_mid)
         self._cmd_pitch = float(c.rc_mid)
         self._cmd_yaw = float(c.rc_mid)
+        self._cmd_throttle = 1500.0
         self._t: float | None = None
 
         self.last_trajectory: TrajectoryEstimate | None = None
@@ -102,7 +103,8 @@ class FPVFollowController:
         bbox_xywh: tuple[float, float, float, float] | None,
         frame_w: int,
         frame_h: int,
-    ) -> tuple[int, int, int]:
+        base_throttle: int = 1500,
+    ) -> tuple[int, int, int, int]:
         c = self.cfg
         now = time.perf_counter()
         dt = 0.033 if self._t is None else clamp(now - self._t, 0.001, 0.1)
@@ -113,7 +115,7 @@ class FPVFollowController:
         self.last_trajectory = traj
 
         if bbox_xywh is None and not self.motion_predictor.kalman.initialized:
-            return self.fade_to_mid()
+            return self.fade_to_mid(base_throttle=base_throttle)
 
         # Update distance estimation using bbox width
         curr_w_px = traj.smoothed_bbox[2] if traj.smoothed_bbox[2] > 0 else (bbox_xywh[2] if bbox_xywh else 50.0)
@@ -125,21 +127,33 @@ class FPVFollowController:
         frame_cx = frame_w * 0.5 + self.sys_cfg.offsets.horizontal_offset_norm * half_w
         frame_cy = frame_h * 0.5 + self.sys_cfg.offsets.vertical_offset_norm * half_h
 
-        # Aim point normalized relative to offset frame center
+        # Aim point normalized relative to offset frame center [-1.0..1.0]
         nx = clamp((traj.aim_cx - frame_cx) / half_w, -1.0, 1.0)
         ny = clamp((traj.aim_cy - frame_cy) / half_h, -1.0, 1.0)
 
-        # PID calculations
+        # PID calculations:
+        # yaw_pid controls horizontal error nx (left/right yaw rotation)
         yaw_res = self.yaw_pid.update(nx, dt, deadzone=c.deadzone_norm, expo=c.expo)
+
+        # altitude_pid controls vertical error ny (climb / descend throttle response)
         alt_res = self.altitude_pid.update(ny, dt, deadzone=c.deadzone_norm, expo=c.expo)
 
+        # Yaw: nx > 0 (target is right) -> yaw right (+offset)
         yaw_off = c.yaw_dir * yaw_res.output
-        pitch_off = c.pitch_dir * alt_res.output + dist_est.recommended_pitch_offset
+
+        # Pitch: target smaller/farther -> pitch forward (+offset), target larger/closer -> pitch backward (-offset)
+        pitch_off = c.pitch_dir * dist_est.recommended_pitch_offset
+
+        # Throttle: ny < 0 (target is higher than center) -> increase throttle to climb
+        # ny > 0 (target is lower than center) -> decrease throttle to descend
+        throttle_off = -alt_res.output
+
         roll_off = 0.0
 
         target_yaw = c.rc_mid + yaw_off
         target_pitch = c.rc_mid + pitch_off
         target_roll = c.rc_mid + roll_off
+        target_throttle = float(base_throttle) + throttle_off
 
         def slew(cur: float, tgt: float, rate: float) -> float:
             step = rate * dt
@@ -148,19 +162,25 @@ class FPVFollowController:
         self._cmd_yaw = slew(self._cmd_yaw, target_yaw, self.sys_cfg.safety.max_yaw_rate)
         self._cmd_pitch = slew(self._cmd_pitch, target_pitch, self.sys_cfg.safety.max_climb_rate)
         self._cmd_roll = slew(self._cmd_roll, target_roll, c.slew_roll)
+        self._cmd_throttle = slew(getattr(self, '_cmd_throttle', float(base_throttle)), target_throttle, 1200.0)
 
-        roll = int(clamp(self._cmd_roll, c.rc_min, c.rc_max))
-        pitch = int(clamp(self._cmd_pitch, c.rc_min, c.rc_max))
-        yaw = int(clamp(self._cmd_yaw, c.rc_min, c.rc_max))
-        return roll, pitch, yaw
+        roll = int(clamp(self._cmd_roll, float(c.rc_min), float(c.rc_max)))
+        pitch = int(clamp(self._cmd_pitch, float(c.rc_min), float(c.rc_max)))
+        yaw = int(clamp(self._cmd_yaw, float(c.rc_min), float(c.rc_max)))
+        throttle = int(clamp(self._cmd_throttle, float(c.rc_min), float(c.rc_max)))
 
-    def fade_to_mid(self, factor: float = 0.88) -> tuple[int, int, int]:
+        return roll, pitch, yaw, throttle
+
+    def fade_to_mid(self, factor: float = 0.88, base_throttle: int = 1500) -> tuple[int, int, int, int]:
         c = self.cfg
         self._cmd_roll = c.rc_mid + (self._cmd_roll - c.rc_mid) * factor
         self._cmd_pitch = c.rc_mid + (self._cmd_pitch - c.rc_mid) * factor
         self._cmd_yaw = c.rc_mid + (self._cmd_yaw - c.rc_mid) * factor
+        cur_thr = getattr(self, '_cmd_throttle', float(base_throttle))
+        self._cmd_throttle = float(base_throttle) + (cur_thr - float(base_throttle)) * factor
         return (
-            int(clamp(self._cmd_roll, c.rc_min, c.rc_max)),
-            int(clamp(self._cmd_pitch, c.rc_min, c.rc_max)),
-            int(clamp(self._cmd_yaw, c.rc_min, c.rc_max)),
+            int(clamp(self._cmd_roll, float(c.rc_min), float(c.rc_max))),
+            int(clamp(self._cmd_pitch, float(c.rc_min), float(c.rc_max))),
+            int(clamp(self._cmd_yaw, float(c.rc_min), float(c.rc_max))),
+            int(clamp(self._cmd_throttle, float(c.rc_min), float(c.rc_max))),
         )

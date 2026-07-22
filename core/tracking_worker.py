@@ -400,11 +400,15 @@ class TrackingWorkerThread(QThread):
 
             safety_state = self.failsafe.evaluate(locked, conf, dist_m if locked else None)
 
-            roll, pitch, yaw = 1500, 1500, 1500
+            roll, pitch, yaw, throttle = 1500, 1500, 1500, self.throttle_value
             if locked and self.assist_enabled and safety_state.is_safe:
-                roll, pitch, yaw = self.controller.update(bbox, w, h)
+                roll, pitch, yaw, throttle = self.controller.update(
+                    bbox, w, h, base_throttle=self.throttle_value
+                )
             else:
-                roll, pitch, yaw = self.controller.fade_to_mid()
+                roll, pitch, yaw, throttle = self.controller.fade_to_mid(
+                    base_throttle=self.throttle_value
+                )
 
             if now - last_msp_send >= msp_interval:
                 last_msp_send = now
@@ -416,9 +420,9 @@ class TrackingWorkerThread(QThread):
                         else:
                             self.fc.disarm()
                     
-                    self.fc.send_control(roll=roll, pitch=pitch, yaw=yaw, throttle=self.throttle_value)
+                    self.fc.send_control(roll=roll, pitch=pitch, yaw=yaw, throttle=throttle)
 
-            self._render_hud(frame, locked, bbox, conf, source, safety_state, roll, pitch, yaw, dist_m, w, h)
+            self._render_hud(frame, locked, bbox, conf, source, safety_state, roll, pitch, yaw, throttle, dist_m, w, h)
 
             err_x = 0.0
             err_y = 0.0
@@ -477,6 +481,7 @@ class TrackingWorkerThread(QThread):
         roll: int,
         pitch: int,
         yaw: int,
+        throttle: int,
         dist_m: float,
         w: int,
         h: int,
@@ -532,7 +537,7 @@ class TrackingWorkerThread(QThread):
         )
         cv2.putText(
             frame,
-            f"CAM:{self.active_cam_idx}  FPS:{self.current_fps:.0f}  AETR R:{roll} P:{pitch} Y:{yaw}  SERIAL:{'OK' if self.is_connected else 'OFF'}",
+            f"CAM:{self.active_cam_idx}  FPS:{self.current_fps:.0f}  AETR R:{roll} P:{pitch} Y:{yaw} T:{throttle}  SERIAL:{'OK' if self.is_connected else 'OFF'}",
             (20, h - 25),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.55,
