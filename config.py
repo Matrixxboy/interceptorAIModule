@@ -20,8 +20,7 @@ AERIAL_THREAT_CLASSES: tuple[str, ...] = (
     "rocket",
     "projectile",
     "aircraft",
-    "helicopter",
-    "person",
+    "helicopter"
 )
 
 DetectionMode = Literal["world", "coco", "custom"]

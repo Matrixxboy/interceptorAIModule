@@ -401,7 +401,7 @@ class TrackingWorkerThread(QThread):
             safety_state = self.failsafe.evaluate(locked, conf, dist_m if locked else None)
 
             roll, pitch, yaw, throttle = 1500, 1500, 1500, self.throttle_value
-            if locked and self.assist_enabled and safety_state.is_safe:
+            if locked and self.assist_enabled and not safety_state.override_active:
                 roll, pitch, yaw, throttle = self.controller.update(
                     bbox, w, h, base_throttle=self.throttle_value
                 )
@@ -412,7 +412,7 @@ class TrackingWorkerThread(QThread):
 
             if now - last_msp_send >= msp_interval:
                 last_msp_send = now
-                if self.is_connected and self.fc.is_connected():
+                if self.is_connected and hasattr(self, 'fc') and self.fc.is_connected():
                     # Handle arm state
                     if self.arm_requested != getattr(self.fc, '_armed', False):
                         if self.arm_requested:
@@ -421,6 +421,12 @@ class TrackingWorkerThread(QThread):
                             self.fc.disarm()
                     
                     self.fc.send_control(roll=roll, pitch=pitch, yaw=yaw, throttle=throttle)
+                    if self.frame_count % 30 == 0:
+                        self.sys_log.log(
+                            LogCategory.DRONE,
+                            f"Follow Control -> R:{roll} P:{pitch} Y:{yaw} T:{throttle} | ARM:{'YES' if self.arm_requested else 'NO'}",
+                            module="FC Link",
+                        )
 
             self._render_hud(frame, locked, bbox, conf, source, safety_state, roll, pitch, yaw, throttle, dist_m, w, h)
 
