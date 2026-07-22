@@ -75,6 +75,9 @@ class MAVLinkController(FlightController):
         self._armed = False
         return True
 
+    def set_flight_mode(self, mode: str) -> None:
+        self._flight_mode = mode.upper()
+
     def send_control(self, roll: int, pitch: int, yaw: int, throttle: int) -> None:
         if not self.is_connected():
             return
@@ -82,9 +85,10 @@ class MAVLinkController(FlightController):
         # Send RC Override
         # Channel map (AETR): 1=Roll, 2=Pitch, 3=Throttle, 4=Yaw
         # AUX1 (Ch 5) = Arm switch (2000 = Arm, 1000 = Disarm)
-        # AUX2 (Ch 6) = Flight Mode switch (1000 = Angle Mode, 2000 = Acro Mode)
+        # AUX2 (Ch 6) = Flight Mode switch (1800..2000 = Angle Mode, <1800 = Acro Mode)
         ch5 = 2000 if self._armed else 1000
-        ch6 = 1000 # Force Angle Mode for stable autonomous tracking
+        mode_str = getattr(self, '_flight_mode', 'ANGLE').upper()
+        ch6 = 1900 if mode_str == "ANGLE" else 1000
         
         # 65535 prevents RC Failsafe on unused channels
         self.master.mav.rc_channels_override_send(
@@ -96,7 +100,7 @@ class MAVLinkController(FlightController):
         if now - self._last_log_time >= 1.0:
             self.sys_log.log(
                 LogCategory.DRONE,
-                f"MAVLink RC sent: R{roll} P{pitch} Y{yaw} T{throttle} | AUX1(Arm):{ch5} AUX2(Mode):{ch6}",
+                f"MAVLink RC sent: R{roll} P{pitch} Y{yaw} T{throttle} | AUX1(Arm):{ch5} AUX2(Mode {mode_str}):{ch6}",
                 module="MAVLink"
             )
             self._last_log_time = now

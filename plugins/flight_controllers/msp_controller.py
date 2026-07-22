@@ -77,13 +77,17 @@ class MSPController(FlightController):
             self.logger.error(f"Failed to send disarm command: {e}")
             return False
 
+    def set_flight_mode(self, mode: str) -> None:
+        self._flight_mode = mode.upper()
+
     def send_control(self, roll: int, pitch: int, yaw: int, throttle: int) -> None:
         if not self.is_connected():
             return
             
+        is_angle = getattr(self, '_flight_mode', 'ANGLE').upper() == "ANGLE"
         channels = msp_link.make_rc_channels(
             roll=roll, pitch=pitch, yaw=yaw, throttle=throttle,
-            arm=self._armed, channel_map=self.channel_map
+            arm=self._armed, flight_mode=is_angle, channel_map=self.channel_map
         )
         payload = msp_link.build_msp_set_raw_rc(channels)
         try:

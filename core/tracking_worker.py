@@ -99,9 +99,12 @@ class TrackingWorkerThread(QThread):
 
     def toggle_flight_mode(self) -> str:
         self.flight_mode = "ACRO" if self.flight_mode == "ANGLE" else "ANGLE"
+        if hasattr(self, 'fc') and hasattr(self.fc, 'set_flight_mode'):
+            self.fc.set_flight_mode(self.flight_mode)
+        ch6_val = 1900 if self.flight_mode == "ANGLE" else 1000
         self.sys_log.log(
             LogCategory.DRONE,
-            f"Flight mode toggled to: {self.flight_mode}",
+            f"Flight mode toggled to: {self.flight_mode} (Ch6 = {ch6_val} µs)",
             module="Manual Control",
         )
         return self.flight_mode
