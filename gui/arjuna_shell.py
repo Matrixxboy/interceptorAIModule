@@ -31,10 +31,12 @@ from PyQt6.QtWidgets import (
 )
 
 from config import SystemConfig
+from control.joystick_manager import JoystickManager
 from core.tracking_worker import TrackingWorkerThread
 from database.target_store import TargetStore
 from gui.calibration_wizard import CalibrationWizard
 from gui.pages.dashboard_page import DashboardPage
+from gui.pages.joystick_page import JoystickPage
 from gui.pages.live_feed_page import LiveFeedPage
 from gui.pages.logs_page import LogsPage
 from gui.pages.placeholder_page import PlaceholderPage
@@ -49,21 +51,12 @@ from sys_logging.system_logger import LogCategory, SystemLogger
 NAV_ITEMS: list[tuple[str, str]] = [
     ("dashboard", "01  Dashboard"),
     ("live_feed", "02  Live Camera Feed"),
-    ("detection", "03  Target Detection"),
-    ("target_manager", "04  Target Manager"),
-    ("target_database", "05  Target Database"),
-    ("pattern_explorer", "06  Pattern Explorer"),
-    ("tracking_analytics", "07  Tracking Analytics"),
-    ("tracking_control", "08  Tracking Control"),
-    ("drone_control", "09  Drone Control"),
-    ("telemetry", "10  Flight Telemetry"),
-    ("mission", "11  Mission Control"),
-    ("ai_models", "12  AI Model Status"),
-    ("camera", "13  Camera Manager"),
-    ("communication", "14  Communication"),
-    ("logs", "15  Logs"),
-    ("calibration", "16  Calibration"),
-    ("settings", "17  Settings"),
+    ("target_database", "03  Target Database"),
+    ("telemetry", "04  Flight Telemetry"),
+    ("joystick", "05  Remote Control"),
+    ("logs", "06  Logs"),
+    ("calibration", "07  Calibration"),
+    ("settings", "08  Settings"),
 ]
 
 
@@ -75,13 +68,14 @@ class ArjunaShell(QMainWindow):
         self.sys_config = sys_config or SystemConfig()
         self.target_store = TargetStore()
         self.sys_log = SystemLogger()
+        self.joystick_mgr = JoystickManager(self.sys_config)
 
         self.setWindowTitle("ARJUNA  ·  Ground Control Station")
         self.resize(1680, 1000)
         self.setMinimumSize(1280, 800)
         self.setStyleSheet(ARJUNA_THEME_QSS)
 
-        self.worker = TrackingWorkerThread(self.sys_config, self.target_store)
+        self.worker = TrackingWorkerThread(self.sys_config, self.target_store, self.joystick_mgr)
         self._init_ui()
         self._wire_signals()
         self.worker.start()
@@ -182,29 +176,18 @@ class ArjunaShell(QMainWindow):
         self.page_dashboard = DashboardPage()
         self.page_live_feed = LiveFeedPage(self.worker, self.sys_config)
         self.page_target_db = TargetDatabasePage(self.target_store)
+        self.page_joystick = JoystickPage(self.sys_config, self.joystick_mgr)
         self.page_logs = LogsPage(self.sys_log)
         self.page_telemetry = TelemetryPage()
 
         self._register_page("dashboard", self.page_dashboard)
         self._register_page("live_feed", self.page_live_feed)
         self._register_page("target_database", self.page_target_db)
+        self._register_page("joystick", self.page_joystick)
         self._register_page("logs", self.page_logs)
         self._register_page("telemetry", self.page_telemetry)
 
-        stubs = [
-            ("detection", "Target Detection", "Multi-object YOLO detection with confidence scoring and prioritization."),
-            ("target_manager", "Target Manager", "Active target lock management, acquisition, and profile evolution."),
-            ("pattern_explorer", "Pattern Explorer", "Feature descriptors, embeddings, and AI representation viewer."),
-            ("tracking_analytics", "Tracking Analytics", "Confidence graphs, motion history, and trajectory analysis."),
-            ("tracking_control", "Tracking Control", "Tracking pipeline configuration and lock stability controls."),
-            ("drone_control", "Drone Control", "Autonomous follow mode and flight command visualization."),
-            ("mission", "Mission Control", "Mission planning and autonomous flight orchestration."),
-            ("ai_models", "AI Model Status", "YOLO model performance, GPU utilization, and inference metrics."),
-            ("camera", "Camera Manager", "Camera source selection and capture configuration."),
-            ("communication", "Communication Center", "MSP / MAVLink link health and protocol management."),
-        ]
-        for key, title, desc in stubs:
-            self._register_page(key, PlaceholderPage(title, desc))
+        # Removed stub pages as part of UI streamlining
 
         calib_widget = QWidget()
         calib_layout = QVBoxLayout(calib_widget)
@@ -224,14 +207,10 @@ class ArjunaShell(QMainWindow):
         calib_layout.addStretch()
         self._register_page("calibration", calib_widget)
 
-        settings_widget = QWidget()
-        settings_layout = QVBoxLayout(settings_widget)
-        settings_layout.setContentsMargins(20, 20, 20, 20)
-        settings_layout.addWidget(PageHeader("Settings", "PID gains and system parameters"))
-        self.pid_panel_settings = PIDTuningPanel(self.sys_config)
-        self.pid_panel_settings.pid_updated.connect(self._on_config_updated)
-        settings_layout.addWidget(self.pid_panel_settings)
-        self._register_page("settings", settings_widget)
+        from gui.pages.settings_page import SettingsPage
+        self.settings_page = SettingsPage(self.sys_config)
+        self.settings_page.config_updated.connect(self._on_config_updated)
+        self._register_page("settings", self.settings_page)
 
         content_l.addWidget(self.stack, stretch=1)
         root.addWidget(content, stretch=1)

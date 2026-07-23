@@ -125,6 +125,49 @@ class TrackerConfig:
 
 
 @dataclass
+class DeviceConfig:
+    theme: str = "dark"
+    ui_scale: float = 1.0
+
+
+@dataclass
+class AuxChannelsConfig:
+    arm_channel: int = 4
+    mode_channel: int = 5
+    arm_high: int = 1800
+    arm_low: int = 1000
+    mode_high: int = 1900
+    mode_low: int = 1000
+
+
+@dataclass
+class JoystickChannelConfig:
+    name: str = ""
+    axis: int = -1
+    is_button: bool = False
+    inverted: bool = False
+    min_val: int = 1000
+    center_val: int = 1500
+    max_val: int = 2000
+
+
+@dataclass
+class JoystickConfig:
+    enabled: bool = False
+    device_name: str = ""
+    deadzone: float = 0.05
+    roll: JoystickChannelConfig = field(default_factory=lambda: JoystickChannelConfig(name="Roll", axis=0))
+    pitch: JoystickChannelConfig = field(default_factory=lambda: JoystickChannelConfig(name="Pitch", axis=1, inverted=False))
+    throttle: JoystickChannelConfig = field(default_factory=lambda: JoystickChannelConfig(name="Throttle", axis=2))
+    yaw: JoystickChannelConfig = field(default_factory=lambda: JoystickChannelConfig(name="Yaw", axis=3))
+    
+    aux_channels: list[JoystickChannelConfig] = field(default_factory=lambda: [
+        JoystickChannelConfig(name="Arm", axis=4),
+        JoystickChannelConfig(name="Flight Mode", axis=5)
+    ])
+
+
+@dataclass
 class SystemConfig:
     detection: DetectionConfig = field(default_factory=DetectionConfig)
     tracker: TrackerConfig = field(default_factory=TrackerConfig)
@@ -136,6 +179,9 @@ class SystemConfig:
     safety: SafetyConfig = field(default_factory=SafetyConfig)
     offsets: OffsetsConfig = field(default_factory=OffsetsConfig)
     camera: CameraConfig = field(default_factory=CameraConfig)
+    device: DeviceConfig = field(default_factory=DeviceConfig)
+    aux_channels: AuxChannelsConfig = field(default_factory=AuxChannelsConfig)
+    joystick: JoystickConfig = field(default_factory=JoystickConfig)
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -161,6 +207,16 @@ class SystemConfig:
                     curr = getattr(target, k)
                     if isinstance(v, dict) and hasattr(curr, "__dataclass_fields__"):
                         update_dataclass(curr, v)
+                    elif isinstance(v, list) and k == "aux_channels":
+                        parsed_list = []
+                        for item in v:
+                            if isinstance(item, dict):
+                                ch = JoystickChannelConfig()
+                                update_dataclass(ch, item)
+                                parsed_list.append(ch)
+                            else:
+                                parsed_list.append(item)
+                        setattr(target, k, parsed_list)
                     elif isinstance(curr, Path):
                         setattr(target, k, Path(v))
                     else:

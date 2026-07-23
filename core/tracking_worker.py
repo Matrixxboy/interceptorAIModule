@@ -16,6 +16,7 @@ from plugins.flight_controllers.msp_controller import MSPController
 from database.target_profile import TargetProfile, TargetStatus
 from database.target_store import TargetStore
 from detection.hybrid_tracker import HybridYoloLockTracker
+from control.joystick_manager import JoystickManager
 from sys_logging.system_logger import LogCategory, LogSeverity, SystemLogger
 from safety.failsafe_manager import FailsafeManager
 from telemetry.telemetry_logger import TelemetryLogger, TelemetryRecord
@@ -43,11 +44,13 @@ class TrackingWorkerThread(QThread):
         self,
         sys_config: SystemConfig,
         target_store: TargetStore | None = None,
+        joystick_mgr: JoystickManager | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self.sys_config = sys_config
         self.target_store = target_store or TargetStore()
+        self.joystick_mgr = joystick_mgr
         self.sys_log = SystemLogger()
         self.running = False
         self.assist_enabled = False
@@ -401,7 +404,16 @@ class TrackingWorkerThread(QThread):
             safety_state = self.failsafe.evaluate(locked, conf, dist_m if locked else None)
 
             roll, pitch, yaw, throttle = 1500, 1500, 1500, self.throttle_value
-            if locked and self.assist_enabled and not safety_state.override_active:
+            if self.sys_config.joystick.enabled and self.joystick_mgr and self.joystick_mgr.state.connected:
+                js = self.joystick_mgr.state
+                roll, pitch, yaw, throttle = js.roll_pwm, js.pitch_pwm, js.yaw_pwm, js.throttle_pwm
+                # Use dynamic AUX channels for arm/mode
+                arm_pwm = js.aux_pwm.get("Arm", 1500)
+                if arm_pwm > 1700:
+                    self.arm_requested = True
+                elif arm_pwm < 1300:
+                    self.arm_requested = False
+            elif locked and self.assist_enabled and not safety_state.override_active:
                 roll, pitch, yaw, throttle = self.controller.update(
                     bbox, w, h, base_throttle=self.throttle_value
                 )

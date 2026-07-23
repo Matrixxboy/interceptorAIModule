@@ -10,3 +10,4 @@ torch>=2.1.0
 torchvision>=0.16.0
 PyQt6>=6.5.0
 pyqtgraph>=0.13.0
+pygame>=2.5.0
