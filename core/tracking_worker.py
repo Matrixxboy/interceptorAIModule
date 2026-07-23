@@ -429,12 +429,23 @@ class TrackingWorkerThread(QThread):
             if self.sys_config.joystick.enabled and self.joystick_mgr and self.joystick_mgr.state.connected:
                 js = self.joystick_mgr.state
                 roll, pitch, yaw, throttle = js.roll_pwm, js.pitch_pwm, js.yaw_pwm, js.throttle_pwm
-                # Map every AUX row onto its configured FC channel (fixes last-AUX not applying)
-                for aux_cfg in self.sys_config.joystick.aux_channels:
-                    if aux_cfg.rc_channel < 0:
+
+                # One FC channel ← one AUX row. Skip duplicate rc_channel mappings.
+                used_rc: set[int] = set()
+                for i, aux_cfg in enumerate(self.sys_config.joystick.aux_channels):
+                    rc = int(aux_cfg.rc_channel)
+                    if rc < 0 or rc > 15:
                         continue
-                    pwm = js.aux_pwm.get(aux_cfg.name, aux_cfg.center_val)
-                    channel_overrides[aux_cfg.rc_channel] = int(pwm)
+                    if rc in used_rc:
+                        continue
+                    # Never let AUX stomp primary sticks (CH1–CH4) unless explicitly CH5+
+                    # (still allow if user set it — but prefer CH5+)
+                    used_rc.add(rc)
+                    pwm = js.aux_pwm.get(
+                        f"#{i}",
+                        js.aux_pwm.get(aux_cfg.name, aux_cfg.center_val),
+                    )
+                    channel_overrides[rc] = int(pwm)
 
                 arm_ch = self.sys_config.aux_channels.arm_channel
                 arm_pwm = channel_overrides.get(

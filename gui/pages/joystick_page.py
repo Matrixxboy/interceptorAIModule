@@ -33,6 +33,63 @@ def _rc_ch_label(index_0based: int) -> str:
     return f"CH{ch}"
 
 
+def _next_free_rc(aux_list: list[JoystickChannelConfig], start: int = 4) -> int:
+    used = {a.rc_channel for a in aux_list if a.rc_channel >= 0}
+    for cand in range(start, 16):
+        if cand not in used:
+            return cand
+    return 15
+
+
+def _next_free_joy_index(aux_list: list[JoystickChannelConfig], as_button: bool = True) -> int:
+    """Next free button (or axis) index so new AUX does not share the same input."""
+    used = {max(0, a.axis) for a in aux_list if a.is_button == as_button}
+    for cand in range(0, 32):
+        if cand not in used:
+            return cand
+    return 0
+
+
+def _dedupe_aux_mappings(aux_list: list[JoystickChannelConfig]) -> list[str]:
+    """Ensure unique FC channels and unique joy indices per type. Returns warning strings."""
+    warnings: list[str] = []
+    seen_rc: dict[int, int] = {}
+    for i, aux in enumerate(aux_list):
+        rc = aux.rc_channel
+        if rc < 0:
+            aux.rc_channel = _next_free_rc(aux_list[:i] + aux_list[i + 1 :])
+            rc = aux.rc_channel
+        if rc in seen_rc:
+            old = aux.rc_channel
+            aux.rc_channel = _next_free_rc([a for j, a in enumerate(aux_list) if j != i])
+            warnings.append(
+                f"'{aux.name}' FC {_rc_ch_label(old)} was shared — moved to {_rc_ch_label(aux.rc_channel)}"
+            )
+            seen_rc[aux.rc_channel] = i
+        else:
+            seen_rc[rc] = i
+
+    # Unique button indices among buttons; unique axis indices among axes
+    for as_btn in (True, False):
+        seen_joy: dict[int, int] = {}
+        for i, aux in enumerate(aux_list):
+            if aux.is_button != as_btn:
+                continue
+            joy = max(0, aux.axis)
+            if joy in seen_joy:
+                old = joy
+                others = [a for j, a in enumerate(aux_list) if j != i and a.is_button == as_btn]
+                aux.axis = _next_free_joy_index(others, as_button=as_btn)
+                kind = "button" if as_btn else "axis"
+                warnings.append(
+                    f"'{aux.name}' Joy {kind} {old + 1} was shared — moved to {aux.axis + 1}"
+                )
+                seen_joy[aux.axis] = i
+            else:
+                seen_joy[joy] = i
+    return warnings
+
+
 class GimbalWidget(QWidget):
     def __init__(self, label: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -205,20 +262,29 @@ class StickConfigRow(QFrame):
 
 
 class AuxConfigRow(QFrame):
-    """AUX mapping — single compact row."""
+    """AUX mapping — single compact row with unique FC / Joy enforcement."""
 
     updated = pyqtSignal()
     delete_requested = pyqtSignal(object)
 
-    def __init__(self, cfg: JoystickChannelConfig, parent=None) -> None:
+    def __init__(
+        self,
+        cfg: JoystickChannelConfig,
+        all_aux: list[JoystickChannelConfig],
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self.cfg = cfg
+        self._all_aux = all_aux
         self.setObjectName("panel")
         self._init_ui()
 
     def _init_ui(self) -> None:
-        row = QHBoxLayout(self)
-        row.setContentsMargins(8, 4, 8, 4)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 4, 8, 4)
+        root.setSpacing(2)
+
+        row = QHBoxLayout()
         row.setSpacing(5)
 
         self.edit_name = QLineEdit(self.cfg.name)
@@ -234,22 +300,20 @@ class AuxConfigRow(QFrame):
         self.combo_rc = QComboBox()
         for i in range(4, 16):
             self.combo_rc.addItem(_rc_ch_label(i), i)
-        for i in range(0, 4):
-            self.combo_rc.addItem(_rc_ch_label(i), i)
-        rc = self.cfg.rc_channel if self.cfg.rc_channel >= 0 else 4
+        rc = self.cfg.rc_channel if self.cfg.rc_channel >= 4 else 4
         idx = self.combo_rc.findData(rc)
         self.combo_rc.setCurrentIndex(idx if idx >= 0 else 0)
-        self.combo_rc.setFixedWidth(108)
+        self.combo_rc.setFixedWidth(118)
         self.combo_rc.setStyleSheet(
             "QComboBox { font-size: 8pt; min-height: 22px; padding: 1px 4px; }"
         )
-        self.combo_rc.setToolTip("MSP channel sent to the flight controller")
+        self.combo_rc.setToolTip("FC channel (must be unique — one AUX per channel)")
         self.combo_rc.currentIndexChanged.connect(self._on_change)
         row.addWidget(_form_lbl("FC"))
         row.addWidget(self.combo_rc)
 
         self.sp_axis = _axis_spin(max(1, self.cfg.axis + 1))
-        self.sp_axis.setToolTip("Joystick axis or button number (1-based)")
+        self.sp_axis.setToolTip("Joystick button/axis number (1-based). Must be unique among AUX.")
         self.sp_axis.valueChanged.connect(self._on_change)
         row.addWidget(_form_lbl("Joy"))
         row.addWidget(self.sp_axis)
@@ -257,6 +321,7 @@ class AuxConfigRow(QFrame):
         self.chk_button = QCheckBox("Btn")
         self.chk_button.setChecked(self.cfg.is_button)
         self.chk_button.setStyleSheet("font-size: 7.5pt;")
+        self.chk_button.setToolTip("On = digital button, Off = analog axis")
         self.chk_button.toggled.connect(self._on_change)
         row.addWidget(self.chk_button)
 
@@ -289,6 +354,34 @@ class AuxConfigRow(QFrame):
         btn_del.clicked.connect(lambda: self.delete_requested.emit(self.cfg))
         row.addWidget(btn_del)
         row.addStretch(1)
+        root.addLayout(row)
+
+        self.lbl_warn = QLabel("")
+        self.lbl_warn.setStyleSheet("color: #b08a3c; font-size: 7.5pt; background: transparent;")
+        self.lbl_warn.setVisible(False)
+        root.addWidget(self.lbl_warn)
+        self._refresh_conflict()
+
+    def _refresh_conflict(self) -> None:
+        msgs = []
+        rc = self.cfg.rc_channel
+        for other in self._all_aux:
+            if other is self.cfg:
+                continue
+            if other.rc_channel == rc and rc >= 0:
+                msgs.append(f"FC {_rc_ch_label(rc)} also used by '{other.name}'")
+            if (
+                other.is_button == self.cfg.is_button
+                and max(0, other.axis) == max(0, self.cfg.axis)
+            ):
+                kind = "button" if self.cfg.is_button else "axis"
+                msgs.append(f"Joy {kind} {self.cfg.axis + 1} also used by '{other.name}'")
+        if msgs:
+            self.lbl_warn.setText("Conflict: " + " · ".join(msgs) + " (auto-fixed on change)")
+            self.lbl_warn.setVisible(True)
+        else:
+            self.lbl_warn.clear()
+            self.lbl_warn.setVisible(False)
 
     def _on_change(self) -> None:
         self.cfg.name = self.edit_name.text().strip() or "AUX"
@@ -299,6 +392,35 @@ class AuxConfigRow(QFrame):
         self.cfg.center_val = self.sp_center.value()
         self.cfg.max_val = self.sp_max.value()
         self.cfg.rc_channel = int(self.combo_rc.currentData())
+
+        # If FC channel collides, move this row to next free CH
+        for other in self._all_aux:
+            if other is self.cfg:
+                continue
+            if other.rc_channel == self.cfg.rc_channel:
+                self.cfg.rc_channel = _next_free_rc(
+                    [a for a in self._all_aux if a is not self.cfg]
+                )
+                idx = self.combo_rc.findData(self.cfg.rc_channel)
+                if idx >= 0:
+                    self.combo_rc.blockSignals(True)
+                    self.combo_rc.setCurrentIndex(idx)
+                    self.combo_rc.blockSignals(False)
+                break
+
+        # If Joy index collides among same type, move to next free
+        for other in self._all_aux:
+            if other is self.cfg:
+                continue
+            if other.is_button == self.cfg.is_button and max(0, other.axis) == max(0, self.cfg.axis):
+                others = [a for a in self._all_aux if a is not self.cfg and a.is_button == self.cfg.is_button]
+                self.cfg.axis = _next_free_joy_index(others, as_button=self.cfg.is_button)
+                self.sp_axis.blockSignals(True)
+                self.sp_axis.setValue(self.cfg.axis + 1)
+                self.sp_axis.blockSignals(False)
+                break
+
+        self._refresh_conflict()
         self.updated.emit()
 
 
@@ -401,7 +523,10 @@ class JoystickPage(QWidget):
         grp_config = QGroupBox("Channel Mapping")
         cfg_layout = QVBoxLayout(grp_config)
         cfg_layout.setSpacing(6)
-        hint = QLabel("Map sticks and AUX channels to the flight controller")
+        hint = QLabel(
+            "Each AUX needs a UNIQUE FC channel and UNIQUE Joy button/axis — "
+            "one input → one channel (duplicates are auto-fixed)."
+        )
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #9aa3b2; font-size: 8pt; background: transparent;")
         cfg_layout.addWidget(hint)
@@ -434,6 +559,9 @@ class JoystickPage(QWidget):
             if w:
                 w.deleteLater()
 
+        for msg in _dedupe_aux_mappings(self.sys_config.joystick.aux_channels):
+            print(f"[Joystick] {msg}")
+
         cfg = self.sys_config.joystick
         for title, ch_cfg in [
             ("Roll", cfg.roll),
@@ -445,19 +573,15 @@ class JoystickPage(QWidget):
             row.updated.connect(self._on_cfg_changed)
             self.cfg_form.addWidget(row)
 
-        aux_hdr = QLabel("AUX → Flight Controller")
+        aux_hdr = QLabel("AUX → Flight Controller  (unique CH + unique Joy per row)")
         aux_hdr.setStyleSheet(
             "color: #9aa3b2; font-size: 8.5pt; font-weight: 650; background: transparent; padding-top: 4px;"
         )
         self.cfg_form.addWidget(aux_hdr)
         for aux in self.sys_config.joystick.aux_channels:
             if aux.rc_channel < 0:
-                used = {a.rc_channel for a in self.sys_config.joystick.aux_channels if a.rc_channel >= 0}
-                for cand in range(4, 16):
-                    if cand not in used:
-                        aux.rc_channel = cand
-                        break
-            row_widget = AuxConfigRow(aux)
+                aux.rc_channel = _next_free_rc(self.sys_config.joystick.aux_channels)
+            row_widget = AuxConfigRow(aux, self.sys_config.joystick.aux_channels)
             row_widget.updated.connect(self._on_cfg_changed)
             row_widget.delete_requested.connect(self._delete_aux_channel)
             self.cfg_form.addWidget(row_widget)
@@ -469,7 +593,6 @@ class JoystickPage(QWidget):
         self._on_cfg_changed()
 
     def _rebuild_aux_bars(self) -> None:
-        """Rebuild AUX monitor bars using stable list indices (fixes last-AUX bug)."""
         layout = self._aux_container_layout
         if layout is None:
             return
@@ -489,23 +612,20 @@ class JoystickPage(QWidget):
             self.aux_bars[i] = bar
 
     def _add_aux_channel(self) -> None:
-        used = {a.rc_channel for a in self.sys_config.joystick.aux_channels}
-        next_rc = 4
-        for cand in range(4, 16):
-            if cand not in used:
-                next_rc = cand
-                break
-        n = len(self.sys_config.joystick.aux_channels) + 1
+        aux_list = self.sys_config.joystick.aux_channels
+        next_rc = _next_free_rc(aux_list)
+        next_joy = _next_free_joy_index(aux_list, as_button=True)
+        n = len(aux_list) + 1
         new_ch = JoystickChannelConfig(
             name=f"AUX{n}",
-            axis=0,
+            axis=next_joy,
             is_button=True,
             rc_channel=next_rc,
             min_val=1000,
             center_val=1000,
             max_val=1800,
         )
-        self.sys_config.joystick.aux_channels.append(new_ch)
+        aux_list.append(new_ch)
         self._build_aux_config()
         self._rebuild_aux_bars()
         self._on_cfg_changed()
@@ -518,7 +638,7 @@ class JoystickPage(QWidget):
             self._on_cfg_changed()
 
     def _on_cfg_changed(self) -> None:
-        # Keep bar labels in sync without destroying widgets when possible
+        _dedupe_aux_mappings(self.sys_config.joystick.aux_channels)
         for i, aux in enumerate(self.sys_config.joystick.aux_channels):
             if i not in self.aux_bars:
                 self._rebuild_aux_bars()
@@ -576,5 +696,5 @@ class JoystickPage(QWidget):
             bar = self.aux_bars.get(i)
             if not bar:
                 continue
-            val = state.aux_pwm.get(aux.name, aux.center_val)
+            val = state.aux_pwm.get(f"#{i}", state.aux_pwm.get(aux.name, aux.center_val))
             bar.set_value(val)

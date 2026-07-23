@@ -142,24 +142,26 @@ class JoystickManager(QObject):
             self.state.throttle_pwm = self._map_to_pwm(self.state.throttle_raw, cfg.throttle)
             self.state.yaw_pwm = self._map_to_pwm(self.state.yaw_raw, cfg.yaw)
 
+            # One entry per AUX row — keyed by stable index so duplicate names
+            # cannot overwrite each other or share the wrong PWM.
             self.state.aux_pwm.clear()
-            for aux in cfg.aux_channels:
-                key = aux.name or f"AUX{aux.rc_channel}"
+            for i, aux in enumerate(cfg.aux_channels):
                 if aux.is_button:
-                    pressed = get_button(aux.axis)
-                    # When inverted: pressed → low, released → high
+                    pressed = get_button(max(0, aux.axis))
                     if pressed ^ aux.inverted:
                         pwm = aux.max_val
                     else:
                         pwm = aux.min_val
-                    self.state.aux_pwm[key] = pwm
-                    # Also store under configured name for ARM lookup
-                    self.state.aux_pwm[aux.name] = pwm
                 else:
-                    raw = get_axis(aux.axis)
+                    raw = get_axis(max(0, aux.axis))
                     pwm = self._map_to_pwm(raw, aux)
-                    self.state.aux_pwm[key] = pwm
-                    self.state.aux_pwm[aux.name] = pwm
+
+                pwm = int(clamp(pwm, 800, 2200))
+                self.state.aux_pwm[f"#{i}"] = pwm
+                # Convenience alias only when the name is unique in the list
+                name = (aux.name or "").strip()
+                if name and sum(1 for a in cfg.aux_channels if (a.name or "").strip() == name) == 1:
+                    self.state.aux_pwm[name] = pwm
 
             self.state.connected = True
         else:

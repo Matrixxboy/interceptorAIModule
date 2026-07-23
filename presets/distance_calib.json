@@ -1,0 +1,8 @@
+{
+  "focal_length_px": 75.0,
+  "known_object_width_m": 1.0,
+  "desired_distance_m": 5.0,
+  "fov_h_deg": 90.0,
+  "size_axis": "max",
+  "notes": "calib at 1.0m size=75.0px"
+}
