@@ -149,6 +149,8 @@ class JoystickChannelConfig:
     min_val: int = 1000
     center_val: int = 1500
     max_val: int = 2000
+    # MSP / INAV RC channel index (0-based). CH5=4 (AUX1), CH6=5 (AUX2), …
+    rc_channel: int = -1
 
 
 @dataclass
@@ -160,10 +162,16 @@ class JoystickConfig:
     pitch: JoystickChannelConfig = field(default_factory=lambda: JoystickChannelConfig(name="Pitch", axis=1, inverted=False))
     throttle: JoystickChannelConfig = field(default_factory=lambda: JoystickChannelConfig(name="Throttle", axis=2))
     yaw: JoystickChannelConfig = field(default_factory=lambda: JoystickChannelConfig(name="Yaw", axis=3))
-    
+
     aux_channels: list[JoystickChannelConfig] = field(default_factory=lambda: [
-        JoystickChannelConfig(name="Arm", axis=4),
-        JoystickChannelConfig(name="Flight Mode", axis=5)
+        JoystickChannelConfig(
+            name="Arm", axis=0, is_button=True, rc_channel=4,
+            min_val=1000, center_val=1000, max_val=1800,
+        ),
+        JoystickChannelConfig(
+            name="Flight Mode", axis=1, is_button=True, rc_channel=5,
+            min_val=1000, center_val=1000, max_val=1900,
+        ),
     ])
 
 

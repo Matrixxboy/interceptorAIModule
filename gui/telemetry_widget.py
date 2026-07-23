@@ -13,15 +13,15 @@ from PyQt6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QVBoxLayout, QWidg
 
 from telemetry.telemetry_logger import TelemetryRecord
 
-pg.setConfigOptions(antialias=True, background="#12151a", foreground="#8b929e")
+pg.setConfigOptions(antialias=True, background="#0f1115", foreground="#9aa3b2")
 
-# Muted industrial chart palette (no neon)
-C_PRIMARY = "#7a8fa3"
-C_SECONDARY = "#9a6363"
-C_OK = "#6a8a74"
-C_WARN = "#a08a5c"
-C_MUTE = "#5c6470"
-C_GRID = "#2c323c"
+# Clean slate chart palette
+C_PRIMARY = "#4f7cac"
+C_SECONDARY = "#b05656"
+C_OK = "#3d8f6a"
+C_WARN = "#b08a3c"
+C_MUTE = "#6b7380"
+C_GRID = "#2a3038"
 
 
 def _make_pen(color: str, width: float = 2.0) -> pg.mkPen:
@@ -41,19 +41,19 @@ class ChartPanel(QWidget):
         header.setContentsMargins(4, 0, 4, 0)
         self.lbl_title = QLabel(title)
         self.lbl_title.setStyleSheet(
-            "color: #8b929e; font-size: 9pt; font-weight: 600; letter-spacing: 1px;"
+            "color: #9aa3b2; font-size: 8.5pt; font-weight: 600; letter-spacing: 1px;"
         )
         self.lbl_value = QLabel("--")
         self.lbl_value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.lbl_value.setStyleSheet(
-            "color: #d8dde6; font-size: 10pt; font-family: Consolas, 'Courier New', monospace;"
+            "color: #e6e9ef; font-size: 9.5pt; font-family: Consolas, 'Courier New', monospace;"
         )
         header.addWidget(self.lbl_title)
         header.addWidget(self.lbl_value, stretch=1)
         root.addLayout(header)
 
         self.plot = pg.PlotWidget()
-        self.plot.setBackground("#1a1e24")
+        self.plot.setBackground("#171a1f")
         self.plot.showGrid(x=True, y=True, alpha=0.2)
         self.plot.setMenuEnabled(False)
         self.plot.hideButtons()
@@ -65,16 +65,16 @@ class ChartPanel(QWidget):
         for axis_name in ("bottom", "left"):
             axis = self.plot.getAxis(axis_name)
             axis.setPen(axis_pen)
-            axis.setTextPen(pg.mkPen("#5c6470"))
+            axis.setTextPen(pg.mkPen(C_MUTE))
             axis.setStyle(tickFont=QFont("Segoe UI", 8), tickTextOffset=4)
 
-        self.plot.getAxis("bottom").setLabel("time (s)", color="#5c6470")
+        self.plot.getAxis("bottom").setLabel("time (s)", color=C_MUTE)
         self.plot.getPlotItem().layout.setContentsMargins(6, 4, 10, 4)
         self.plot.getPlotItem().setContentsMargins(0, 0, 0, 0)
 
         root.addWidget(self.plot, stretch=1)
 
-    def set_value_text(self, text: str, color: str = "#d8dde6") -> None:
+    def set_value_text(self, text: str, color: str = "#e6e9ef") -> None:
         self.lbl_value.setText(text)
         self.lbl_value.setStyleSheet(
             f"color: {color}; font-size: 10pt; font-family: Consolas, 'Courier New', monospace;"
@@ -107,7 +107,7 @@ class RealTimeTelemetryPlots(QWidget):
 
         # --- Tracking error ---
         self.panel_err = ChartPanel("TRACKING ERROR (px)")
-        self.panel_err.plot.getAxis("left").setLabel("error", color="#5c6470")
+        self.panel_err.plot.getAxis("left").setLabel("error", color=C_MUTE)
         self.panel_err.plot.addLegend(offset=(8, 8), labelTextSize="8pt")
         self.panel_err.plot.addItem(
             pg.InfiniteLine(pos=0, angle=0, pen=pg.mkPen(C_MUTE, width=1, style=Qt.PenStyle.DashLine))
@@ -116,24 +116,24 @@ class RealTimeTelemetryPlots(QWidget):
             pen=_make_pen(C_PRIMARY, 2.0),
             name="Err X",
             fillLevel=0,
-            brush=pg.mkBrush(122, 143, 163, 28),
+            brush=pg.mkBrush(79, 124, 172, 28),
         )
         self.curve_err_y = self.panel_err.plot.plot(pen=_make_pen(C_SECONDARY, 2.0), name="Err Y")
 
         # --- Distance ---
         self.panel_dist = ChartPanel("TARGET DISTANCE (m)")
-        self.panel_dist.plot.getAxis("left").setLabel("meters", color="#5c6470")
+        self.panel_dist.plot.getAxis("left").setLabel("meters", color=C_MUTE)
         self.panel_dist.plot.addLegend(offset=(8, 8), labelTextSize="8pt")
         self.curve_dist = self.panel_dist.plot.plot(
             pen=_make_pen(C_OK, 2.0),
             name="Distance",
             fillLevel=0,
-            brush=pg.mkBrush(106, 138, 116, 30),
+            brush=pg.mkBrush(61, 143, 106, 30),
         )
 
         # --- Confidence ---
         self.panel_conf = ChartPanel("LOCK CONFIDENCE")
-        self.panel_conf.plot.getAxis("left").setLabel("%", color="#5c6470")
+        self.panel_conf.plot.getAxis("left").setLabel("%", color=C_MUTE)
         self.panel_conf.plot.setYRange(0, 100, padding=0.02)
         self.panel_conf.plot.addLegend(offset=(8, 8), labelTextSize="8pt")
         self.panel_conf.plot.addItem(
@@ -148,12 +148,12 @@ class RealTimeTelemetryPlots(QWidget):
 
         # --- RC commands ---
         self.panel_cmd = ChartPanel("RC COMMANDS (µs)")
-        self.panel_cmd.plot.getAxis("left").setLabel("PWM", color="#5c6470")
+        self.panel_cmd.plot.getAxis("left").setLabel("PWM", color=C_MUTE)
         self.panel_cmd.plot.addLegend(offset=(8, 8), labelTextSize="8pt")
         self.panel_cmd.plot.addItem(
             pg.InfiniteLine(pos=1500, angle=0, pen=pg.mkPen(C_MUTE, width=1, style=Qt.PenStyle.DashLine))
         )
-        self.curve_yaw = self.panel_cmd.plot.plot(pen=_make_pen("#8b929e", 2.0), name="Yaw")
+        self.curve_yaw = self.panel_cmd.plot.plot(pen=_make_pen("#9aa3b2", 2.0), name="Yaw")
         self.curve_pitch = self.panel_cmd.plot.plot(pen=_make_pen(C_PRIMARY, 2.0), name="Pitch")
 
         layout.addWidget(self.panel_err, 0, 0)

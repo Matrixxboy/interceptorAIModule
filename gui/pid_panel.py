@@ -1,80 +1,36 @@
-"""PID Tuning Panel Widget for Real-Time Parameter Adjustment."""
+"""Compact PID tuning — all axes in one frame (spinboxes only)."""
 
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QDoubleSpinBox,
-    QFormLayout,
+    QGridLayout,
     QGroupBox,
-    QSizePolicy,
-    QTabWidget,
+    QLabel,
     QVBoxLayout,
     QWidget,
 )
 
-from config import PIDAxisConfig, SystemConfig
+from config import SystemConfig
 
 
-class SinglePIDGroup(QGroupBox):
-    changed = pyqtSignal()
-
-    def __init__(self, title: str, config: PIDAxisConfig, max_kp: float = 1000.0, parent: QWidget | None = None) -> None:
-        super().__init__(title, parent)
-        self.cfg = config
-        self._init_ui(max_kp)
-
-    def _init_ui(self, max_kp: float) -> None:
-        layout = QFormLayout(self)
-        layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
-        layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
-        layout.setContentsMargins(8, 12, 8, 8)
-        layout.setSpacing(8)
-
-        def _spin(value: float, lo: float, hi: float, step: float) -> QDoubleSpinBox:
-            sp = QDoubleSpinBox()
-            sp.setRange(lo, hi)
-            sp.setSingleStep(step)
-            sp.setValue(value)
-            sp.setMinimumWidth(100)
-            sp.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            sp.valueChanged.connect(self._on_change)
-            return sp
-
-        self.sp_kp = _spin(self.cfg.kp, 0.0, max_kp, 5.0)
-        self.sp_ki = _spin(self.cfg.ki, 0.0, 500.0, 1.0)
-        self.sp_kd = _spin(self.cfg.kd, 0.0, 500.0, 1.0)
-        self.sp_max = _spin(self.cfg.max_output, 10.0, 500.0, 10.0)
-
-        layout.addRow("Kp", self.sp_kp)
-        layout.addRow("Ki", self.sp_ki)
-        layout.addRow("Kd", self.sp_kd)
-        layout.addRow("Max (µs)", self.sp_max)
-
-    def _on_change(self) -> None:
-        self.cfg.kp = self.sp_kp.value()
-        self.cfg.ki = self.sp_ki.value()
-        self.cfg.kd = self.sp_kd.value()
-        self.cfg.max_output = self.sp_max.value()
-        self.changed.emit()
-
-    def update_from_config(self, cfg: PIDAxisConfig) -> None:
-        self.cfg = cfg
-        self.sp_kp.blockSignals(True)
-        self.sp_ki.blockSignals(True)
-        self.sp_kd.blockSignals(True)
-        self.sp_max.blockSignals(True)
-        self.sp_kp.setValue(cfg.kp)
-        self.sp_ki.setValue(cfg.ki)
-        self.sp_kd.setValue(cfg.kd)
-        self.sp_max.setValue(cfg.max_output)
-        self.sp_kp.blockSignals(False)
-        self.sp_ki.blockSignals(False)
-        self.sp_kd.blockSignals(False)
-        self.sp_max.blockSignals(False)
+def _spin(value: float, lo: float, hi: float, step: float) -> QDoubleSpinBox:
+    sp = QDoubleSpinBox()
+    sp.setRange(lo, hi)
+    sp.setSingleStep(step)
+    sp.setDecimals(1)
+    sp.setValue(value)
+    sp.setMinimumWidth(100)
+    sp.setMaximumWidth(110)
+    sp.setAlignment(Qt.AlignmentFlag.AlignRight)
+    sp.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.UpDownArrows)
+    return sp
 
 
 class PIDTuningPanel(QWidget):
+    """Yaw / Altitude / Position PID values in a single compact table."""
+
     pid_updated = pyqtSignal()
 
     def __init__(self, sys_config: SystemConfig, parent: QWidget | None = None) -> None:
@@ -83,27 +39,82 @@ class PIDTuningPanel(QWidget):
         self._init_ui()
 
     def _init_ui(self) -> None:
-        layout = QVBoxLayout(self)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(4, 4, 4, 4)
+        root.setSpacing(6)
 
-        tabs = QTabWidget()
+        box = QGroupBox("PID Gains")
+        grid = QGridLayout(box)
+        grid.setContentsMargins(10, 12, 10, 10)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(6)
 
-        self.grp_yaw = SinglePIDGroup("Yaw PID (Heading)", self.sys_config.yaw_pid, max_kp=1000.0)
-        self.grp_yaw.changed.connect(self.pid_updated.emit)
+        headers = ["", "Yaw", "Altitude / Pitch", "Position"]
+        for col, text in enumerate(headers):
+            lbl = QLabel(text)
+            lbl.setStyleSheet("color: #9aa3b2; font-weight: 650; font-size: 8pt; background: transparent;")
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter if col else Qt.AlignmentFlag.AlignLeft)
+            grid.addWidget(lbl, 0, col)
 
-        self.grp_alt = SinglePIDGroup("Altitude / Pitch PID", self.sys_config.altitude_pid, max_kp=1000.0)
-        self.grp_alt.changed.connect(self.pid_updated.emit)
+        self.sp_yaw: dict[str, QDoubleSpinBox] = {}
+        self.sp_alt: dict[str, QDoubleSpinBox] = {}
+        self.sp_pos: dict[str, QDoubleSpinBox] = {}
 
-        self.grp_pos = SinglePIDGroup("Position PID", self.sys_config.position_pid, max_kp=500.0)
-        self.grp_pos.changed.connect(self.pid_updated.emit)
+        rows = [
+            ("Kp", "kp", 1000.0, 5.0),
+            ("Ki", "ki", 500.0, 1.0),
+            ("Kd", "kd", 500.0, 1.0),
+            ("Max µs", "max_output", 500.0, 10.0),
+        ]
 
-        tabs.addTab(self.grp_yaw, "Yaw PID")
-        tabs.addTab(self.grp_alt, "Altitude PID")
-        tabs.addTab(self.grp_pos, "Position PID")
+        for r, (label, field, hi, step) in enumerate(rows, start=1):
+            name = QLabel(label)
+            name.setStyleSheet("color: #6b7380; font-size: 8.5pt; background: transparent;")
+            grid.addWidget(name, r, 0)
 
-        layout.addWidget(tabs)
+            for col, (store, cfg, max_kp) in enumerate(
+                [
+                    (self.sp_yaw, self.sys_config.yaw_pid, 1000.0),
+                    (self.sp_alt, self.sys_config.altitude_pid, 1000.0),
+                    (self.sp_pos, self.sys_config.position_pid, 500.0),
+                ],
+                start=1,
+            ):
+                use_hi = max_kp if field == "kp" else hi
+                sp = _spin(getattr(cfg, field), 0.0 if field != "max_output" else 10.0, use_hi, step)
+                sp.valueChanged.connect(self._on_change)
+                store[field] = sp
+                grid.addWidget(sp, r, col, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        tip = QLabel("Higher Kp = stronger correction · raise Max if the stick saturates early")
+        tip.setStyleSheet("color: #6b7380; font-size: 7.5pt; background: transparent;")
+        tip.setWordWrap(True)
+        grid.addWidget(tip, len(rows) + 1, 0, 1, 4)
+
+        root.addWidget(box)
+        root.addStretch(1)
+
+    def _on_change(self) -> None:
+        for store, cfg in (
+            (self.sp_yaw, self.sys_config.yaw_pid),
+            (self.sp_alt, self.sys_config.altitude_pid),
+            (self.sp_pos, self.sys_config.position_pid),
+        ):
+            cfg.kp = store["kp"].value()
+            cfg.ki = store["ki"].value()
+            cfg.kd = store["kd"].value()
+            cfg.max_output = store["max_output"].value()
+        self.pid_updated.emit()
 
     def load_config(self, sys_config: SystemConfig) -> None:
         self.sys_config = sys_config
-        self.grp_yaw.update_from_config(sys_config.yaw_pid)
-        self.grp_alt.update_from_config(sys_config.altitude_pid)
-        self.grp_pos.update_from_config(sys_config.position_pid)
+        mapping = (
+            (self.sp_yaw, sys_config.yaw_pid),
+            (self.sp_alt, sys_config.altitude_pid),
+            (self.sp_pos, sys_config.position_pid),
+        )
+        for store, cfg in mapping:
+            for field in ("kp", "ki", "kd", "max_output"):
+                store[field].blockSignals(True)
+                store[field].setValue(getattr(cfg, field))
+                store[field].blockSignals(False)

@@ -19,11 +19,12 @@ class PageHeader(QWidget):
     ) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 8)
+        layout.setContentsMargins(0, 0, 0, 6)
         layout.setSpacing(2)
 
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
 
         title_col = QVBoxLayout()
         title_col.setSpacing(2)
@@ -35,11 +36,12 @@ class PageHeader(QWidget):
         if subtitle:
             sub = QLabel(subtitle)
             sub.setObjectName("pageSubtitle")
+            sub.setWordWrap(True)
             title_col.addWidget(sub)
 
         row.addLayout(title_col, stretch=1)
         self.right_layout = QHBoxLayout()
-        self.right_layout.setSpacing(8)
+        self.right_layout.setSpacing(6)
         row.addLayout(self.right_layout)
         layout.addLayout(row)
 
@@ -50,25 +52,24 @@ class PageHeader(QWidget):
 
 
 class StatusPill(QLabel):
-    """Muted status chip — industrial, not neon."""
+    """Compact status chip."""
 
     def __init__(self, text: str = "IDLE", tone: str = "neutral", parent=None) -> None:
         super().__init__(text, parent)
         self.setObjectName("statusPill")
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setMinimumWidth(72)
-        self.setMinimumHeight(22)
+        self.setMinimumWidth(64)
+        self.setMinimumHeight(24)
         self.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         self.set_tone(tone)
 
     def set_tone(self, tone: str) -> None:
-        # bg, border, fg — desaturated operational colors
         colors = {
-            "ok": ("#1a2420", PALETTE["ok"], "#a8c0b0"),
-            "warn": ("#242018", PALETTE["warn"], "#c8b890"),
-            "error": ("#241a1a", PALETTE["error"], "#c4a0a0"),
-            "info": ("#1a2024", PALETTE["info"], "#b0c0cc"),
-            "neutral": ("#1a1e24", PALETTE["border"], PALETTE["text_dim"]),
+            "ok": ("#14241c", PALETTE["ok"], "#b8e0cc"),
+            "warn": ("#242014", PALETTE["warn"], "#e8d4a0"),
+            "error": ("#241616", PALETTE["error"], "#f0c0c0"),
+            "info": ("#141c24", PALETTE["info"], "#c0d8f0"),
+            "neutral": ("#171a1f", PALETTE["border"], PALETTE["text_dim"]),
         }
         bg, border, fg = colors.get(tone, colors["neutral"])
         self.setStyleSheet(
@@ -77,11 +78,11 @@ class StatusPill(QLabel):
                 background-color: {bg};
                 color: {fg};
                 border: 1px solid {border};
-                border-radius: 2px;
-                padding: 3px 10px;
-                font-size: 8pt;
+                border-radius: 4px;
+                padding: 3px 8px;
+                font-size: 7.5pt;
                 font-weight: 650;
-                letter-spacing: 0.8px;
+                letter-spacing: 0.6px;
             }}
             """
         )

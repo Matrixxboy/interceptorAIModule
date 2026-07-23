@@ -202,8 +202,19 @@ def make_rc_channels(
     aux3: int | None = None,
     aux4: int | None = None,
     channel_map: str = "AETR",
+    arm_channel: int = ARM_CH,
+    mode_channel: int = MODE_CH,
+    arm_high: int = ARM_HIGH,
+    arm_low: int = ARM_LOW,
+    mode_high: int = MODE_HIGH,
+    mode_low: int = MODE_LOW,
+    channel_overrides: dict[int, int] | None = None,
 ) -> list[int]:
-    """Assemble 16-channel RC array supporting AETR and TAER channel maps."""
+    """Assemble 16-channel RC array supporting AETR/TAER maps and AUX overrides.
+
+    Channel indices are 0-based (CH1=0 … CH16=15).
+    AUX1 is typically index 4 (CH5), AUX2 index 5 (CH6).
+    """
     ch = [RC_MID] * NUM_CHANNELS
 
     map_str = channel_map.upper()
@@ -212,15 +223,29 @@ def make_rc_channels(
         ch[1] = clamp(roll, RC_MIN, RC_MAX)
         ch[2] = clamp(pitch, RC_MIN, RC_MAX)
         ch[3] = clamp(yaw, RC_MIN, RC_MAX)
-    else:  # AETR1234
+    else:  # AETR
         ch[0] = clamp(roll, RC_MIN, RC_MAX)
         ch[1] = clamp(pitch, RC_MIN, RC_MAX)
         ch[2] = clamp(throttle, RC_MIN, RC_MAX)
         ch[3] = clamp(yaw, RC_MIN, RC_MAX)
 
-    ch[4] = aux1 if aux1 is not None else (ARM_HIGH if arm else ARM_LOW)
-    ch[5] = aux2 if aux2 is not None else (MODE_HIGH if flight_mode else MODE_LOW)
-    ch[6] = aux3 if aux3 is not None else (ARM_HIGH if arm else ARM_LOW)
-    ch[7] = aux4 if aux4 is not None else RC_MID
+    # Default AUX1–AUX4 mid/low unless explicitly provided
+    ch[4] = clamp(aux1 if aux1 is not None else RC_MID, RC_MIN, RC_MAX)
+    ch[5] = clamp(aux2 if aux2 is not None else RC_MID, RC_MIN, RC_MAX)
+    ch[6] = clamp(aux3 if aux3 is not None else RC_MID, RC_MIN, RC_MAX)
+    ch[7] = clamp(aux4 if aux4 is not None else RC_MID, RC_MIN, RC_MAX)
+
+    # Apply configured ARM / Mode channels (may be same as AUX1/AUX2)
+    a_ch = max(0, min(NUM_CHANNELS - 1, int(arm_channel)))
+    m_ch = max(0, min(NUM_CHANNELS - 1, int(mode_channel)))
+    ch[a_ch] = clamp(arm_high if arm else arm_low, RC_MIN, RC_MAX)
+    ch[m_ch] = clamp(mode_high if flight_mode else mode_low, RC_MIN, RC_MAX)
+
+    # Explicit per-channel overrides (joystick AUX mapping, etc.)
+    if channel_overrides:
+        for idx, pwm in channel_overrides.items():
+            i = int(idx)
+            if 0 <= i < NUM_CHANNELS:
+                ch[i] = clamp(pwm, RC_MIN, RC_MAX)
 
     return ch

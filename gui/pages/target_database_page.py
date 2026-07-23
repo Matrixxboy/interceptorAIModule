@@ -125,7 +125,7 @@ class TargetDatabasePage(QWidget):
 
         stats = self.store.stats()
         self.lbl_stats = QLabel(f"Total targets: {stats['total']}")
-        self.lbl_stats.setStyleSheet("color: #64748b;")
+        self.lbl_stats.setStyleSheet("color: #6b7380;")
         layout.addWidget(self.lbl_stats)
 
     def refresh_list(self) -> None:

@@ -78,7 +78,7 @@ class DashboardPage(QWidget):
             "4. Enable Follow · monitor Telemetry"
         )
         hint.setStyleSheet(
-            "color: #64748b; font-size: 9pt; background: transparent; line-height: 1.4;"
+            "color: #6b7380; font-size: 9pt; background: transparent; line-height: 1.4;"
         )
         panel_hint.add_widget(hint)
         bottom.addWidget(panel_hint, stretch=1)

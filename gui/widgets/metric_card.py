@@ -66,15 +66,15 @@ class MetricCard(QFrame):
         self.setStyleSheet(
             f"""
             QFrame#metricCard {{
-                background-color: #1a1e24;
-                border: 1px solid #2c323c;
+                background-color: #171a1f;
+                border: 1px solid #2a3038;
                 border-top: 2px solid {accent};
-                border-radius: 3px;
+                border-radius: 6px;
             }}
             QFrame#metricCard:hover {{
-                border: 1px solid #3a424e;
+                border: 1px solid #343b45;
                 border-top: 2px solid {accent};
-                background-color: #1e222a;
+                background-color: #1e2329;
             }}
             """
         )

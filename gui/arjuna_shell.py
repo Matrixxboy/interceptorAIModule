@@ -71,8 +71,8 @@ class ArjunaShell(QMainWindow):
         self.joystick_mgr = JoystickManager(self.sys_config)
 
         self.setWindowTitle("ARJUNA  ·  Ground Control Station")
-        self.resize(1680, 1000)
-        self.setMinimumSize(1280, 800)
+        self.resize(1560, 920)
+        self.setMinimumSize(1180, 720)
         self.setStyleSheet(ARJUNA_THEME_QSS)
 
         self.worker = TrackingWorkerThread(self.sys_config, self.target_store, self.joystick_mgr)
@@ -92,7 +92,7 @@ class ArjunaShell(QMainWindow):
         # ----- Sidebar -----
         sidebar = QFrame()
         sidebar.setObjectName("sidebar")
-        sidebar.setFixedWidth(236)
+        sidebar.setFixedWidth(210)
         sb = QVBoxLayout(sidebar)
         sb.setContentsMargins(0, 0, 0, 0)
         sb.setSpacing(0)
@@ -100,7 +100,7 @@ class ArjunaShell(QMainWindow):
         brand = QFrame()
         brand.setObjectName("brandBlock")
         brand_l = QVBoxLayout(brand)
-        brand_l.setContentsMargins(18, 22, 18, 18)
+        brand_l.setContentsMargins(14, 16, 14, 14)
         brand_l.setSpacing(2)
 
         mark = QLabel("◈  AUTONOMOUS GCS")
@@ -145,8 +145,8 @@ class ArjunaShell(QMainWindow):
         topbar = QFrame()
         topbar.setObjectName("panel")
         topbar.setStyleSheet(
-            "QFrame#panel { border: none; border-bottom: 1px solid #2c323c; "
-            "border-radius: 0; background: #161a20; }"
+            "QFrame#panel { border: none; border-bottom: 1px solid #2a3038; "
+            "border-radius: 0; background: #13161b; }"
         )
         top_l = QHBoxLayout(topbar)
         top_l.setContentsMargins(16, 8, 16, 8)
@@ -165,7 +165,7 @@ class ArjunaShell(QMainWindow):
 
         self.lbl_active_page = QLabel("DASHBOARD")
         self.lbl_active_page.setStyleSheet(
-            "color: #5c6470; font-size: 8pt; letter-spacing: 2px; font-weight: 650; background: transparent;"
+            "color: #6b7380; font-size: 8pt; letter-spacing: 2px; font-weight: 650; background: transparent;"
         )
         top_l.addWidget(self.lbl_active_page)
         content_l.addWidget(topbar)
@@ -196,7 +196,7 @@ class ArjunaShell(QMainWindow):
 
         calib_layout.addWidget(PageHeader("Calibration", "Tune camera geometry and follow-controller response"))
         calib_note = QLabel("Use the calibration wizard to verify stick directions and follow gains before armed flight.")
-        calib_note.setStyleSheet("color: #64748b; background: transparent;")
+        calib_note.setStyleSheet("color: #6b7380; background: transparent;")
         calib_note.setWordWrap(True)
         calib_layout.addWidget(calib_note)
         btn_calib = QPushButton("Open Calibration Wizard")
@@ -232,7 +232,7 @@ class ArjunaShell(QMainWindow):
     def _register_page(self, key: str, widget: QWidget) -> None:
         wrapper = QWidget()
         wrap_l = QVBoxLayout(wrapper)
-        wrap_l.setContentsMargins(14, 10, 14, 10)
+        wrap_l.setContentsMargins(10, 8, 10, 8)
         wrap_l.setSpacing(0)
         widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         wrap_l.addWidget(widget)
@@ -299,6 +299,11 @@ class ArjunaShell(QMainWindow):
 
     def _on_config_updated(self) -> None:
         self.worker.update_config(self.sys_config)
+        # Keep Live Feed PID/Params panels in sync with Settings
+        if hasattr(self.page_live_feed, "pid_panel"):
+            self.page_live_feed.pid_panel.load_config(self.sys_config)
+        if hasattr(self.page_live_feed, "params_panel"):
+            self.page_live_feed.params_panel.load_config(self.sys_config)
 
     def _open_calibration(self) -> None:
         from core.config_manager import ConfigManager

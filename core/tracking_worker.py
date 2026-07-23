@@ -137,7 +137,17 @@ class TrackingWorkerThread(QThread):
 
         # Attempt 1: Try MSPController (for Betaflight / INAV / MSP)
         try:
-            msp = MSPController(port=port_name, baudrate=baud_rate)
+            aux = self.sys_config.aux_channels
+            msp = MSPController(
+                port=port_name,
+                baudrate=baud_rate,
+                arm_channel=aux.arm_channel,
+                mode_channel=aux.mode_channel,
+                arm_high=aux.arm_high,
+                arm_low=aux.arm_low,
+                mode_high=aux.mode_high,
+                mode_low=aux.mode_low,
+            )
             if msp.connect():
                 self.fc = msp
                 self.is_connected = True
@@ -191,6 +201,17 @@ class TrackingWorkerThread(QThread):
         self.sys_config = cfg
         self.controller.update_sys_config(cfg)
         self.failsafe.update_config(cfg.safety)
+        # Keep MSP ARM/Mode channel mapping in sync with Settings → AUX
+        if hasattr(self, "fc") and hasattr(self.fc, "update_aux_config"):
+            aux = cfg.aux_channels
+            self.fc.update_aux_config(
+                arm_channel=aux.arm_channel,
+                mode_channel=aux.mode_channel,
+                arm_high=aux.arm_high,
+                arm_low=aux.arm_low,
+                mode_high=aux.mode_high,
+                mode_low=aux.mode_low,
+            )
 
     def set_roi_lock(self, x: int, y: int, w: int, h: int) -> None:
         self.pending_roi = (x, y, w, h)
@@ -404,14 +425,25 @@ class TrackingWorkerThread(QThread):
             safety_state = self.failsafe.evaluate(locked, conf, dist_m if locked else None)
 
             roll, pitch, yaw, throttle = 1500, 1500, 1500, self.throttle_value
+            channel_overrides: dict[int, int] = {}
             if self.sys_config.joystick.enabled and self.joystick_mgr and self.joystick_mgr.state.connected:
                 js = self.joystick_mgr.state
                 roll, pitch, yaw, throttle = js.roll_pwm, js.pitch_pwm, js.yaw_pwm, js.throttle_pwm
-                # Use dynamic AUX channels for arm/mode
-                arm_pwm = js.aux_pwm.get("Arm", 1500)
-                if arm_pwm > 1700:
+                # Map every AUX row onto its configured FC channel (fixes last-AUX not applying)
+                for aux_cfg in self.sys_config.joystick.aux_channels:
+                    if aux_cfg.rc_channel < 0:
+                        continue
+                    pwm = js.aux_pwm.get(aux_cfg.name, aux_cfg.center_val)
+                    channel_overrides[aux_cfg.rc_channel] = int(pwm)
+
+                arm_ch = self.sys_config.aux_channels.arm_channel
+                arm_pwm = channel_overrides.get(
+                    arm_ch,
+                    js.aux_pwm.get("Arm", self.sys_config.aux_channels.arm_low),
+                )
+                if arm_pwm >= self.sys_config.aux_channels.arm_high - 50:
                     self.arm_requested = True
-                elif arm_pwm < 1300:
+                elif arm_pwm <= self.sys_config.aux_channels.arm_low + 50:
                     self.arm_requested = False
             elif locked and self.assist_enabled and not safety_state.override_active:
                 roll, pitch, yaw, throttle = self.controller.update(
@@ -424,19 +456,20 @@ class TrackingWorkerThread(QThread):
 
             if now - last_msp_send >= msp_interval:
                 last_msp_send = now
-                if self.is_connected and hasattr(self, 'fc') and self.fc.is_connected():
-                    # Handle arm state
-                    if self.arm_requested != getattr(self.fc, '_armed', False):
+                if self.is_connected and hasattr(self, "fc") and self.fc.is_connected():
+                    if hasattr(self.fc, "set_channel_overrides"):
+                        self.fc.set_channel_overrides(channel_overrides)
+                    if self.arm_requested != getattr(self.fc, "_armed", False):
                         if self.arm_requested:
                             self.fc.arm()
                         else:
                             self.fc.disarm()
-                    
+
                     self.fc.send_control(roll=roll, pitch=pitch, yaw=yaw, throttle=throttle)
                     if self.frame_count % 30 == 0:
                         self.sys_log.log(
                             LogCategory.DRONE,
-                            f"Follow Control -> R:{roll} P:{pitch} Y:{yaw} T:{throttle} | ARM:{'YES' if self.arm_requested else 'NO'}",
+                            f"Follow Control -> R:{roll} P:{pitch} Y:{yaw} T:{throttle} | ARM:{'YES' if self.arm_requested else 'NO'} | AUX:{channel_overrides}",
                             module="FC Link",
                         )
 
