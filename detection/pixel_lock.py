@@ -142,7 +142,7 @@ class PixelLockEngine:
             spread_old = np.std(inliers_old, axis=0).mean()
             spread_new = np.std(inliers_new, axis=0).mean()
             if spread_old > 1.0:
-                scale = float(np.clip(spread_new / spread_old, 0.85, 1.15))
+                scale = float(np.clip(spread_new / spread_old, 0.70, 1.40))
                 bw = float(np.clip(bw * scale, 12.0, img_w * 0.8))
                 bh = float(np.clip(bh * scale, 12.0, img_h * 0.8))
 

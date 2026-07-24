@@ -1,8 +1,9 @@
-"""Distance calibration parameters — uses Live Feed lock data (no separate camera)."""
+"""Distance calibration — Live Feed lock KPIs + tape-measure focal setup."""
 
 from __future__ import annotations
 
 from collections import deque
+from statistics import median
 
 from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot
 from PyQt6.QtWidgets import (
@@ -17,6 +18,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -33,6 +35,8 @@ from estimation.distance_calib import (
     save_distance_calib,
     validate_calib_inputs,
 )
+from gui.style import PALETTE
+from gui.widgets.metric_card import MetricCard
 from gui.widgets.page_header import PageHeader, StatusPill
 
 
@@ -42,13 +46,13 @@ def _dspin(value: float, lo: float, hi: float, step: float, decimals: int = 2) -
     sp.setSingleStep(step)
     sp.setDecimals(decimals)
     sp.setValue(value)
-    sp.setMinimumWidth(110)
+    sp.setMinimumWidth(118)
     sp.setAlignment(Qt.AlignmentFlag.AlignRight)
     return sp
 
 
 class DistanceCalibPage(QWidget):
-    """Set every distance parameter; calibrate focal from Live Feed lock bbox."""
+    """Parameters + KPIs driven by the Live Feed lock box (no separate camera)."""
 
     calib_saved = pyqtSignal()
 
@@ -62,9 +66,13 @@ class DistanceCalibPage(QWidget):
         self.worker = worker
         self.sys_config = sys_config
         self._locked = False
-        self._size_history: deque[float] = deque(maxlen=60)
+        self._size_history: deque[float] = deque(maxlen=90)
+        self._w_history: deque[float] = deque(maxlen=90)
+        self._h_history: deque[float] = deque(maxlen=90)
         self._last_size_px: float | None = None
         self._last_dist_m: float | None = None
+        self._last_bw = 0.0
+        self._last_bh = 0.0
 
         self._build_ui()
         self._load_from_config()
@@ -73,52 +81,53 @@ class DistanceCalibPage(QWidget):
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(8)
+        root.setSpacing(10)
 
         header = PageHeader(
             "Distance Calibration",
-            "Lock a tight box on Live Feed, then set tape distance + object size here. "
-            "Formula: Dist = (object_m × focal_px) / box_px",
+            "Lock a tight box on Live Feed · Dist = (object_m × focal_px) / box_px",
         )
         self.pill_status = StatusPill("NO LIVE LOCK", "warn")
         header.right_layout.addWidget(self.pill_status)
         root.addWidget(header)
 
+        # ---- KPI row ----
+        kpi_row = QHBoxLayout()
+        kpi_row.setSpacing(8)
+        self.kpi_dist = MetricCard("Distance", "-- m", "from lock box", PALETTE["ok"])
+        self.kpi_size = MetricCard("Box size", "-- px", "measured axis", PALETTE["accent"])
+        self.kpi_w = MetricCard("Width", "-- px", "bbox W", PALETTE["info"])
+        self.kpi_h = MetricCard("Height", "-- px", "bbox H", "#c9a227")
+        self.kpi_focal = MetricCard("Focal", "-- px", "calibrated", PALETTE["accent"])
+        self.kpi_stable = MetricCard("Stability", "--", "size jitter", PALETTE["warn"])
+        for card in (
+            self.kpi_dist, self.kpi_size, self.kpi_w,
+            self.kpi_h, self.kpi_focal, self.kpi_stable,
+        ):
+            card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            card.setMinimumHeight(88)
+            kpi_row.addWidget(card)
+        root.addLayout(kpi_row)
+
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         body = QWidget()
-        body_l = QVBoxLayout(body)
-        body_l.setContentsMargins(0, 0, 8, 0)
+        body_l = QHBoxLayout(body)
+        body_l.setContentsMargins(0, 4, 4, 0)
         body_l.setSpacing(12)
 
-        # ---- Live readout from Live Feed ----
-        live = QGroupBox("Live Feed Readout")
-        live_l = QGridLayout(live)
-        live_l.setContentsMargins(12, 14, 12, 12)
-        live_l.setHorizontalSpacing(16)
-        live_l.setVerticalSpacing(8)
-        self.lbl_lock = QLabel("Lock: —")
-        self.lbl_box = QLabel("Box size: —")
-        self.lbl_dist = QLabel("Estimated distance: —")
-        self.lbl_bbox = QLabel("BBox: —")
-        for i, lbl in enumerate((self.lbl_lock, self.lbl_box, self.lbl_dist, self.lbl_bbox)):
-            lbl.setStyleSheet("background: transparent; font-size: 10pt;")
-            live_l.addWidget(lbl, i // 2, i % 2)
-        tip = QLabel(
-            "Go to Live Camera Feed → drag a tight ROI on the object → return here to calibrate."
-        )
-        tip.setWordWrap(True)
-        tip.setStyleSheet("color: #6b7380; background: transparent;")
-        live_l.addWidget(tip, 2, 0, 1, 2)
-        body_l.addWidget(live)
+        # ---- Left: tape calib ----
+        left = QVBoxLayout()
+        left.setSpacing(10)
 
-        # ---- Tape-measure calibration ----
         tape = QGroupBox("Tape-Measure Calibration")
+        tape.setObjectName("panel")
         tape_form = QFormLayout(tape)
-        tape_form.setContentsMargins(12, 14, 12, 12)
-        tape_form.setHorizontalSpacing(12)
-        tape_form.setVerticalSpacing(8)
+        tape_form.setContentsMargins(14, 18, 14, 14)
+        tape_form.setHorizontalSpacing(14)
+        tape_form.setVerticalSpacing(10)
+        tape_form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
 
         self.sp_tape_m = _dspin(1.0, MIN_CALIB_DISTANCE_M, 30.0, 0.05, 3)
         self.sp_tape_m.setSuffix(" m")
@@ -137,44 +146,80 @@ class DistanceCalibPage(QWidget):
 
         self.combo_axis = QComboBox()
         self.combo_axis.addItems(["max", "width", "height", "diag"])
-        tape_form.addRow("Size axis", self.combo_axis)
+        self.combo_axis.setToolTip(
+            "Which lock-box dimension drives distance.\n"
+            "Use width for phones/books edge-on; height for upright bottles; max is safest default."
+        )
+        tape_form.addRow("Size axis (pixel edge)", self.combo_axis)
 
         help_lbl = QLabel(
-            "Q1 = camera → object in meters.  Q2 = real size of what is INSIDE the lock box "
-            "(phone ~7 cm, bottle ~6–8, book ~15). Loose box = wrong distance."
+            "1) Live Feed → drag a TIGHT box on object edges\n"
+            "2) Enter tape distance (m) + real size inside the box (cm)\n"
+            "3) Compute Focal — then walk closer/farther to verify"
         )
         help_lbl.setWordWrap(True)
-        help_lbl.setStyleSheet("color: #6b7380; background: transparent; font-size: 8.5pt;")
+        help_lbl.setStyleSheet(
+            f"color: {PALETTE['text_mute']}; background: transparent; font-size: 8.5pt; "
+            "padding: 6px 0;"
+        )
         tape_form.addRow(help_lbl)
 
         btn_row = QHBoxLayout()
-        self.btn_calibrate = QPushButton("Compute Focal from Live Lock")
+        btn_row.setSpacing(8)
+        self.btn_calibrate = QPushButton("Compute Focal from Lock")
         self.btn_calibrate.setObjectName("btnPrimary")
+        self.btn_calibrate.setMinimumHeight(34)
         self.btn_calibrate.clicked.connect(self._calibrate_from_live)
         btn_row.addWidget(self.btn_calibrate)
-        self.btn_save = QPushButton("Save Calib File")
+        self.btn_save = QPushButton("Save")
         self.btn_save.setObjectName("btnGhost")
         self.btn_save.clicked.connect(self._save_only)
         btn_row.addWidget(self.btn_save)
-        self.btn_reload = QPushButton("Reload File")
+        self.btn_reload = QPushButton("Reload")
         self.btn_reload.setObjectName("btnGhost")
         self.btn_reload.clicked.connect(self._reload_calib)
         btn_row.addWidget(self.btn_reload)
-        btn_row.addStretch()
         tape_form.addRow(btn_row)
 
         self.lbl_result = QLabel("")
         self.lbl_result.setWordWrap(True)
-        self.lbl_result.setStyleSheet("background: transparent; color: #9aa3ad;")
+        self.lbl_result.setStyleSheet(
+            f"color: {PALETTE['text_dim']}; background: transparent; font-size: 9pt;"
+        )
         tape_form.addRow(self.lbl_result)
-        body_l.addWidget(tape)
+        left.addWidget(tape)
 
-        # ---- All distance parameters ----
+        readout = QGroupBox("Lock Box Pixels")
+        ro = QVBoxLayout(readout)
+        ro.setContentsMargins(14, 16, 14, 14)
+        ro.setSpacing(6)
+        self.lbl_lock = QLabel("Waiting for Live Feed lock…")
+        self.lbl_bbox = QLabel("BBox: —")
+        self.lbl_axis = QLabel("Measured edge: —")
+        for lbl in (self.lbl_lock, self.lbl_bbox, self.lbl_axis):
+            lbl.setStyleSheet(
+                f"color: {PALETTE['text']}; background: transparent; font-size: 10pt;"
+            )
+            ro.addWidget(lbl)
+        note = QLabel(
+            "Yellow line on Live Feed = measured axis. "
+            "Keep the box snug — empty margin inflates distance error."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet(
+            f"color: {PALETTE['text_mute']}; background: transparent; font-size: 8.5pt;"
+        )
+        ro.addWidget(note)
+        left.addWidget(readout)
+        left.addStretch(1)
+        body_l.addLayout(left, stretch=2)
+
+        # ---- Right: all distance params ----
         params = QGroupBox("Distance Parameters")
         grid = QGridLayout(params)
-        grid.setContentsMargins(12, 14, 12, 12)
+        grid.setContentsMargins(14, 18, 14, 14)
         grid.setHorizontalSpacing(12)
-        grid.setVerticalSpacing(8)
+        grid.setVerticalSpacing(10)
 
         d = self.sys_config.distance
         self.sp_focal = _dspin(d.focal_length_px, 50.0, 20000.0, 10.0, 1)
@@ -196,33 +241,70 @@ class DistanceCalibPage(QWidget):
         fields = [
             (0, 0, "Focal length", self.sp_focal),
             (0, 2, "Known object width", self.sp_known_m),
-            (1, 0, "Desired follow distance", self.sp_desired),
-            (1, 2, "Min safe distance", self.sp_min_safe),
-            (2, 0, "Max follow range", self.sp_max_range),
-            (2, 2, "Max pitch offset", self.sp_max_pitch),
+            (1, 0, "Desired follow", self.sp_desired),
+            (1, 2, "Min safe", self.sp_min_safe),
+            (2, 0, "Max range", self.sp_max_range),
+            (2, 2, "Max pitch", self.sp_max_pitch),
             (3, 0, "Distance Kp", self.sp_kp),
             (3, 2, "Distance Ki", self.sp_ki),
             (4, 0, "Distance Kd", self.sp_kd),
         ]
         for row, col, text, widget in fields:
-            grid.addWidget(QLabel(text), row, col)
+            lbl = QLabel(text)
+            lbl.setStyleSheet(f"color: {PALETTE['text_mute']}; background: transparent;")
+            grid.addWidget(lbl, row, col)
             grid.addWidget(widget, row, col + 1)
             widget.valueChanged.connect(self._apply_params_live)
 
-        apply_row = QHBoxLayout()
-        self.btn_apply = QPushButton("Apply Parameters to Live Feed")
+        self.btn_apply = QPushButton("Apply to Live Feed")
         self.btn_apply.setObjectName("btnPrimary")
+        self.btn_apply.setMinimumHeight(34)
         self.btn_apply.clicked.connect(self._apply_and_notify)
-        apply_row.addWidget(self.btn_apply)
-        apply_row.addStretch()
-        grid.addLayout(apply_row, 5, 0, 1, 4)
-        body_l.addWidget(params)
+        grid.addWidget(self.btn_apply, 5, 0, 1, 4)
 
-        body_l.addStretch(1)
+        body_l.addWidget(params, stretch=3)
+
         scroll.setWidget(body)
         root.addWidget(scroll, stretch=1)
 
         self.combo_axis.currentTextChanged.connect(self._on_axis_changed)
+        self._update_focal_kpi()
+
+    def _stable_size_px(self) -> float | None:
+        """Median of recent samples with outlier rejection — stable pixel count for calib."""
+        if len(self._size_history) < 5:
+            return None
+        samples = list(self._size_history)
+        med = float(median(samples))
+        if med < 8.0:
+            return None
+        filtered = [s for s in samples if abs(s - med) / med <= 0.18]
+        if len(filtered) < 3:
+            filtered = samples
+        return float(median(filtered))
+
+    def _jitter_pct(self) -> float | None:
+        if len(self._size_history) < 8:
+            return None
+        med = float(median(self._size_history))
+        if med < 1.0:
+            return None
+        # mean absolute deviation / median
+        mad = sum(abs(s - med) for s in self._size_history) / len(self._size_history)
+        return 100.0 * mad / med
+
+    def _update_focal_kpi(self) -> None:
+        f = self.sys_config.distance.focal_length_px
+        cal = "calibrated" if is_calibrated(self.sys_config) else "default / FOV"
+        self.kpi_focal.set_value(f"{f:.0f} px", cal)
+
+    def _clear_kpis(self) -> None:
+        self.kpi_dist.set_value("-- m", "no lock")
+        self.kpi_size.set_value("-- px", "no lock")
+        self.kpi_w.set_value("-- px", "bbox W")
+        self.kpi_h.set_value("-- px", "bbox H")
+        self.kpi_stable.set_value("--", "size jitter")
+        self.kpi_stable.set_accent(PALETTE["warn"])
 
     def _load_from_config(self) -> None:
         d = self.sys_config.distance
@@ -248,6 +330,7 @@ class DistanceCalibPage(QWidget):
             self.combo_axis.setCurrentIndex(idx)
         for w in widgets:
             w.blockSignals(False)
+        self._update_focal_kpi()
         self._refresh_status_labels()
 
     def _refresh_status_labels(self) -> None:
@@ -276,7 +359,6 @@ class DistanceCalibPage(QWidget):
         d.max_pitch_offset = float(self.sp_max_pitch.value())
 
     def _apply_params_live(self) -> None:
-        # Keep object cm spin in sync when known_m edited
         if self.sender() is self.sp_known_m:
             self.sp_object_cm.blockSignals(True)
             self.sp_object_cm.setValue(self.sp_known_m.value() * 100.0)
@@ -288,11 +370,12 @@ class DistanceCalibPage(QWidget):
 
         self._write_config_from_widgets()
         self.worker.update_config(self.sys_config)
+        self._update_focal_kpi()
 
     def _apply_and_notify(self) -> None:
         self._apply_params_live()
         self.calib_saved.emit()
-        self.lbl_result.setText("Parameters applied to Live Feed / follow controller.")
+        self.lbl_result.setText("Parameters applied to Live Feed.")
 
     @pyqtSlot(object, object)
     def _on_live_telemetry(self, _frame, rec) -> None:
@@ -300,48 +383,78 @@ class DistanceCalibPage(QWidget):
             locked = bool(getattr(rec, "locked", False))
             self._locked = locked
             if not locked:
-                self.lbl_lock.setText("Lock: none — lock on Live Feed first")
-                self.lbl_box.setText("Box size: —")
-                self.lbl_dist.setText("Estimated distance: —")
+                self.lbl_lock.setText("Waiting for Live Feed lock…")
                 self.lbl_bbox.setText("BBox: —")
+                self.lbl_axis.setText("Measured edge: —")
                 self._size_history.clear()
+                self._w_history.clear()
+                self._h_history.clear()
                 self._last_size_px = None
                 self._last_dist_m = None
+                self._clear_kpis()
                 self._refresh_status_labels()
                 return
 
-            bw = float(getattr(rec, "bbox_w", 0.0))
-            bh = float(getattr(rec, "bbox_h", 0.0))
+            bw = max(1.0, float(getattr(rec, "bbox_w", 0.0)))
+            bh = max(1.0, float(getattr(rec, "bbox_h", 0.0)))
             bx = float(getattr(rec, "bbox_x", 0.0))
             by = float(getattr(rec, "bbox_y", 0.0))
             axis = self.combo_axis.currentText()
             size_px = bbox_size_px((bx, by, bw, bh), axis)
+
+            # Reject tiny / exploding box noise
+            if self._last_size_px and self._last_size_px > 12:
+                if size_px > self._last_size_px * 2.8 or size_px < self._last_size_px * 0.35:
+                    size_px = self._last_size_px
+
+            self._w_history.append(bw)
+            self._h_history.append(bh)
+            self._size_history.append(size_px)
+            self._last_bw, self._last_bh = bw, bh
+            self._last_size_px = size_px
+
+            stable = self._stable_size_px() or size_px
             dist_m = estimate_distance_m(
-                size_px,
+                stable,
                 self.sys_config.distance.focal_length_px,
                 self.sys_config.distance.known_object_width_m,
             )
-            self._size_history.append(size_px)
-            self._last_size_px = size_px
             self._last_dist_m = dist_m
-            avg = sum(self._size_history) / len(self._size_history)
+            jitter = self._jitter_pct()
 
             src = str(getattr(rec, "source", "lock")).upper()
-            self.lbl_lock.setText(f"Lock: YES ({src})")
-            self.lbl_box.setText(f"Box size: {size_px:.1f} px  (avg {avg:.1f}, axis={axis})")
-            self.lbl_dist.setText(f"Estimated distance: {dist_m:.3f} m  ({dist_m * 100:.0f} cm)")
-            self.lbl_bbox.setText(f"BBox: {bw:.0f}×{bh:.0f} px at ({bx:.0f},{by:.0f})")
+            self.lbl_lock.setText(f"Lock active · {src} · conf {float(getattr(rec, 'confidence', 0)) * 100:.0f}%")
+            self.lbl_bbox.setText(f"BBox: {bw:.0f} × {bh:.0f} px   at ({bx:.0f}, {by:.0f})")
+            self.lbl_axis.setText(
+                f"Measured edge ({axis}): {stable:.1f} px   "
+                f"(raw {size_px:.1f} · n={len(self._size_history)})"
+            )
+
+            self.kpi_dist.set_value(f"{dist_m:.2f} m", f"{dist_m * 100:.0f} cm")
+            self.kpi_size.set_value(f"{stable:.0f} px", f"axis={axis}")
+            self.kpi_w.set_value(f"{bw:.0f} px", "bbox width")
+            self.kpi_h.set_value(f"{bh:.0f} px", "bbox height")
+            self._update_focal_kpi()
+            if jitter is None:
+                self.kpi_stable.set_value("…", "warming up")
+                self.kpi_stable.set_accent(PALETTE["warn"])
+            else:
+                tone = PALETTE["ok"] if jitter < 4.0 else (PALETTE["warn"] if jitter < 10.0 else PALETTE["error"])
+                self.kpi_stable.set_value(f"{jitter:.1f}%", "MAD / median")
+                self.kpi_stable.set_accent(tone)
+
             self._refresh_status_labels()
         except Exception:
             pass
 
     def _calibrate_from_live(self) -> None:
-        if not self._locked or len(self._size_history) < 5:
+        size_px = self._stable_size_px()
+        if not self._locked or size_px is None:
             QMessageBox.warning(
                 self,
-                "Need Live Feed lock",
-                "Open Live Camera Feed, drag a tight box on the object, wait a second, "
-                "then come back and calibrate.",
+                "Need stable Live Feed lock",
+                "Open Live Camera Feed, drag a tight box on the object edges, "
+                "wait until Stability KPI drops under ~5%, then calibrate.",
             )
             return
 
@@ -352,7 +465,6 @@ class DistanceCalibPage(QWidget):
             QMessageBox.warning(self, "Invalid input", err)
             return
 
-        size_px = sum(self._size_history) / len(self._size_history)
         width_m = object_cm / 100.0
         axis = self.combo_axis.currentText()
         new_f = focal_from_sample(size_px, dist_m, width_m)
@@ -379,26 +491,30 @@ class DistanceCalibPage(QWidget):
 
         self.worker.update_config(self.sys_config)
         self.calib_saved.emit()
+        self._update_focal_kpi()
         self._refresh_status_labels()
 
         ok = abs(verify - dist_m) < 0.02
+        jitter = self._jitter_pct()
+        jit_txt = f"{jitter:.1f}%" if jitter is not None else "n/a"
         self.lbl_result.setText(
-            f"Avg box {size_px:.1f} px · focal {new_f:.1f} px · verify {verify:.3f} m "
-            f"(tape {dist_m:.3f} m)\nSaved → {path}"
+            f"Median box {size_px:.1f} px · jitter {jit_txt} · focal {new_f:.1f} px · "
+            f"verify {verify:.3f} m (tape {dist_m:.3f} m)\nSaved → {path}"
         )
         if ok:
             QMessageBox.information(
                 self,
                 "Calibration OK",
-                f"Focal = {new_f:.1f} px\nObject = {object_cm:.1f} cm\n"
+                f"Focal = {new_f:.1f} px\nBox = {size_px:.1f} px ({axis})\n"
                 f"Verify = {verify:.3f} m\n\n"
-                "On Live Feed, move closer/farther — distance should change.",
+                "On Live Feed, move closer/farther — W/H px and DIST should track.",
             )
         else:
             QMessageBox.warning(
                 self,
                 "Verify mismatch",
-                f"Verify {verify:.3f} m vs tape {dist_m:.3f} m. Use a tighter lock box.",
+                f"Verify {verify:.3f} m vs tape {dist_m:.3f} m.\n"
+                "Tighten the lock box on Live Feed and retry.",
             )
 
     def _save_only(self) -> None:
@@ -410,7 +526,8 @@ class DistanceCalibPage(QWidget):
             return
         self.worker.update_config(self.sys_config)
         self.calib_saved.emit()
-        self.lbl_result.setText(f"Saved current parameters → {path}")
+        self._update_focal_kpi()
+        self.lbl_result.setText(f"Saved → {path}")
 
     def _reload_calib(self) -> None:
         data = load_distance_calib(self.sys_config)
@@ -420,4 +537,4 @@ class DistanceCalibPage(QWidget):
         self._load_from_config()
         self.worker.update_config(self.sys_config)
         self.calib_saved.emit()
-        self.lbl_result.setText("Reloaded saved calibration into Live Feed config.")
+        self.lbl_result.setText("Reloaded saved calibration.")

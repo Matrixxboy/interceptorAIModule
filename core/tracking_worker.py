@@ -17,6 +17,7 @@ from database.target_profile import TargetProfile, TargetStatus
 from database.target_store import TargetStore
 from detection.hybrid_tracker import HybridYoloLockTracker
 from control.joystick_manager import JoystickManager
+from estimation.distance_calib import bbox_size_px
 from sys_logging.system_logger import LogCategory, LogSeverity, SystemLogger
 from safety.failsafe_manager import FailsafeManager
 from telemetry.telemetry_logger import TelemetryLogger, TelemetryRecord
@@ -567,11 +568,38 @@ class TrackingWorkerThread(QThread):
         cv2.rectangle(frame, (cx - dz_px_x, cy - dz_px_y), (cx + dz_px_x, cy + dz_px_y), (255, 255, 0), 1)
 
         if locked and bbox is not None:
-            bx, by, bw, bh = bbox
+            bx, by, bw, bh = [int(v) for v in bbox]
             obj_cx, obj_cy = bx + bw // 2, by + bh // 2
-            cv2.rectangle(frame, (bx, by), (bx + bw, by + bh), (0, 255, 255), 2)
-            cv2.circle(frame, (obj_cx, obj_cy), 5, (0, 255, 255), -1)
-            cv2.line(frame, (cx, cy), (obj_cx, obj_cy), (255, 0, 255), 2)
+            axis = getattr(self.sys_config.distance, "size_axis", "max") or "max"
+            size_px = bbox_size_px((float(bx), float(by), float(bw), float(bh)), axis)
+
+            # Tight lock box + corner ticks so pixel size is readable
+            cv2.rectangle(frame, (bx, by), (bx + bw, by + bh), (0, 255, 200), 2)
+            tick = max(6, min(18, min(bw, bh) // 6))
+            # corners
+            for cx0, cy0, dx, dy in (
+                (bx, by, 1, 1),
+                (bx + bw, by, -1, 1),
+                (bx, by + bh, 1, -1),
+                (bx + bw, by + bh, -1, -1),
+            ):
+                cv2.line(frame, (cx0, cy0), (cx0 + dx * tick, cy0), (0, 255, 120), 2)
+                cv2.line(frame, (cx0, cy0), (cx0, cy0 + dy * tick), (0, 255, 120), 2)
+
+            # Highlight the measured axis (the dimension used for distance)
+            if axis == "height":
+                cv2.line(frame, (obj_cx, by), (obj_cx, by + bh), (0, 220, 255), 2)
+            elif axis == "diag":
+                cv2.line(frame, (bx, by), (bx + bw, by + bh), (0, 220, 255), 2)
+            else:
+                # width or max → emphasize horizontal when width >= height else vertical
+                if axis == "width" or bw >= bh:
+                    cv2.line(frame, (bx, obj_cy), (bx + bw, obj_cy), (0, 220, 255), 2)
+                else:
+                    cv2.line(frame, (obj_cx, by), (obj_cx, by + bh), (0, 220, 255), 2)
+
+            cv2.circle(frame, (obj_cx, obj_cy), 4, (0, 255, 255), -1)
+            cv2.line(frame, (cx, cy), (obj_cx, obj_cy), (255, 0, 255), 1)
 
             if self.controller.last_trajectory:
                 aim_x = int(self.controller.last_trajectory.aim_cx)
@@ -579,23 +607,37 @@ class TrackingWorkerThread(QThread):
                 cv2.circle(frame, (aim_x, aim_y), 4, (0, 255, 0), -1)
 
             tid = self.active_target.target_id if self.active_target else "---"
+            label_y = max(16, by - 8)
             cv2.putText(
                 frame,
-                f"ARJUNA LOCK [{tid}] {source.upper()} ({conf * 100:.0f}%)",
-                (bx, max(15, by - 8)),
+                f"LOCK [{tid}] {source.upper()} {conf * 100:.0f}%",
+                (bx, label_y),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
+                0.48,
                 (0, 255, 255),
-                2,
+                1,
+                cv2.LINE_AA,
+            )
+            # Pixel KPIs under the box — critical for distance accuracy
+            cv2.putText(
+                frame,
+                f"W:{bw}px  H:{bh}px  SIZE:{size_px:.0f}px ({axis})",
+                (bx, min(h - 8, by + bh + 18)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.48,
+                (80, 255, 160),
+                1,
+                cv2.LINE_AA,
             )
             cv2.putText(
                 frame,
-                f"DIST: {dist_m:.1f}m",
-                (bx, by + bh + 18),
+                f"DIST {dist_m:.2f} m",
+                (bx, min(h - 8, by + bh + 38)),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
+                0.55,
                 (100, 255, 100),
                 2,
+                cv2.LINE_AA,
             )
 
         header_color = (0, 255, 0) if safety.is_safe else (0, 0, 255)

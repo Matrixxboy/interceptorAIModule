@@ -51,8 +51,8 @@ class VideoDisplayWidget(QLabel):
         if not content.contains(pos):
             return None
         img_h, img_w = self.current_frame.shape[:2]
-        ix = int((pos.x() - content.x()) * img_w / max(1, content.width()))
-        iy = int((pos.y() - content.y()) * img_h / max(1, content.height()))
+        ix = int(round((pos.x() - content.x()) * img_w / max(1, content.width())))
+        iy = int(round((pos.y() - content.y()) * img_h / max(1, content.height())))
         ix = max(0, min(img_w - 1, ix))
         iy = max(0, min(img_h - 1, iy))
         return ix, iy

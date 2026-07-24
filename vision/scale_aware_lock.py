@@ -9,8 +9,8 @@ import numpy as np
 class ScaleAwareLock:
     """Template lock that searches across scales so pixel size tracks distance.
 
-    CSRT is disabled by default — OpenCV's CSRT can hard-crash the process on
-    some Windows builds when used concurrently with other trackers/detectors.
+    Size comes from multi-scale NCC. Optional CSRT is used for center only and
+    is size-capped so it cannot inflate the box into the background.
     """
 
     def __init__(self, use_csrt: bool = False) -> None:
@@ -20,6 +20,8 @@ class ScaleAwareLock:
         self._scale = 1.0
         self._misses = 0
         self._csrt = None
+        self._last_score = 0.0
+        self._frames = 0
 
     @property
     def scale(self) -> float:
@@ -28,6 +30,10 @@ class ScaleAwareLock:
     @property
     def bbox(self) -> tuple[float, float, float, float] | None:
         return self._bbox
+
+    @property
+    def last_score(self) -> float:
+        return self._last_score
 
     @property
     def locked(self) -> bool:
@@ -50,10 +56,12 @@ class ScaleAwareLock:
         self._scale = 1.0
         self._misses = 0
         self._csrt = None
+        self._last_score = 0.0
+        self._frames = 0
 
-    def init(self, frame_bgr: np.ndarray, bbox_xywh: tuple[int, int, int, int]) -> bool:
+    def init(self, frame_bgr: np.ndarray, bbox_xywh: tuple[float, float, float, float]) -> bool:
         try:
-            x, y, w, h = [int(v) for v in bbox_xywh]
+            x, y, w, h = [int(round(float(v))) for v in bbox_xywh]
             fh, fw = frame_bgr.shape[:2]
             x = max(0, min(x, fw - 2))
             y = max(0, min(y, fh - 2))
@@ -68,6 +76,8 @@ class ScaleAwareLock:
             self._bbox = (float(x), float(y), float(w), float(h))
             self._scale = 1.0
             self._misses = 0
+            self._last_score = 1.0
+            self._frames = 0
             self._csrt = None
             if self.use_csrt:
                 self._csrt = self._make_csrt()
@@ -89,12 +99,12 @@ class ScaleAwareLock:
         if tw0 < 4 or th0 < 4:
             return None
 
-        # Fewer scales = less CPU / less chance of OpenCV edge-case crashes
-        lo = max(0.5, self._scale * 0.75)
-        hi = min(2.0, self._scale * 1.30)
-        scales = [float(s) for s in np.linspace(lo, hi, 9)]
+        # Wide enough band to track approach/recede; still local around current scale
+        lo = max(0.35, self._scale * 0.62)
+        hi = min(2.8, self._scale * 1.55)
+        scales = [float(s) for s in np.linspace(lo, hi, 13)]
 
-        pad = max(80, int(max(w, h) * 1.2))
+        pad = max(120, int(max(w, h) * 1.6))
         fh, fw = gray.shape[:2]
         x0 = max(0, int(x) - pad)
         y0 = max(0, int(y) - pad)
@@ -121,16 +131,19 @@ class ScaleAwareLock:
             if best is None or max_val > best[0]:
                 best = (float(max_val), float(x0 + max_loc[0]), float(y0 + max_loc[1]), float(tw), float(th), s)
 
-        if best is None or best[0] < 0.42:
+        if best is None or best[0] < 0.38:
             return None
         score, nx, ny, nw, nh, s = best
-        self._scale = 0.7 * self._scale + 0.3 * s
+        # Smooth scale but allow real approach/recede
+        self._scale = 0.55 * self._scale + 0.45 * s
+        self._last_score = score
         return (nx, ny, nw, nh, score)
 
     def update(self, frame_bgr: np.ndarray) -> tuple[bool, tuple[float, float, float, float] | None]:
         if self._template is None:
             return False, None
         try:
+            self._frames += 1
             gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
             ms = self._multiscale_match(gray)
 
@@ -144,34 +157,55 @@ class ScaleAwareLock:
                     self._csrt = None
 
             if ms is not None:
-                nx, ny, nw, nh, _score = ms
+                nx, ny, nw, nh, score = ms
+                # Center blend with CSRT only; size always from multi-scale match
                 if csrt_box is not None:
-                    cx = 0.65 * nx + 0.35 * csrt_box[0]
-                    cy = 0.65 * ny + 0.35 * csrt_box[1]
-                    self._bbox = (cx, cy, nw, nh)
+                    cx = 0.70 * (nx + nw * 0.5) + 0.30 * (csrt_box[0] + csrt_box[2] * 0.5)
+                    cy = 0.70 * (ny + nh * 0.5) + 0.30 * (csrt_box[1] + csrt_box[3] * 0.5)
+                    self._bbox = (cx - nw * 0.5, cy - nh * 0.5, nw, nh)
                 else:
                     self._bbox = (nx, ny, nw, nh)
                 self._misses = 0
+
+                # Refresh template occasionally when match is strong (reduces drift)
+                if score >= 0.72 and self._frames % 45 == 0 and self._bbox is not None:
+                    bx, by, bw, bh = [int(round(v)) for v in self._bbox]
+                    fh, fw = frame_bgr.shape[:2]
+                    bx = max(0, min(bx, fw - 2))
+                    by = max(0, min(by, fh - 2))
+                    bw = max(12, min(bw, fw - bx))
+                    bh = max(12, min(bh, fh - by))
+                    patch = frame_bgr[by : by + bh, bx : bx + bw]
+                    if patch.size > 0 and patch.shape[0] >= 8 and patch.shape[1] >= 8:
+                        self._template = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
+                        self._scale = 1.0  # template is new base scale
+
                 return True, self._bbox
 
             if csrt_box is not None and self._bbox is not None:
                 lx, ly, lw, lh = self._bbox
-                cx, cy, cw, ch = csrt_box
-                if cw > 3.0 * lw or ch > 3.0 * lh or cw < 0.3 * lw or ch < 0.3 * lh:
-                    self._bbox = (cx, cy, lw, lh)
+                cx = csrt_box[0] + csrt_box[2] * 0.5
+                cy = csrt_box[1] + csrt_box[3] * 0.5
+                cw, ch = csrt_box[2], csrt_box[3]
+                # Reject CSRT size explosion — keep last size, move center only
+                if cw > 2.2 * lw or ch > 2.2 * lh or cw < 0.45 * lw or ch < 0.45 * lh:
+                    self._bbox = (cx - lw * 0.5, cy - lh * 0.5, lw, lh)
                 else:
-                    self._bbox = csrt_box
+                    # Mild size EMA toward CSRT when reasonable
+                    nw = 0.85 * lw + 0.15 * cw
+                    nh = 0.85 * lh + 0.15 * ch
+                    self._bbox = (cx - nw * 0.5, cy - nh * 0.5, nw, nh)
                 self._misses = 0
                 return True, self._bbox
 
             self._misses += 1
-            if self._misses > 25:
+            if self._misses > 30:
                 self.reset()
                 return False, None
             return True, self._bbox
         except Exception:
             self._misses += 1
-            if self._misses > 25:
+            if self._misses > 30:
                 self.reset()
                 return False, None
             return True, self._bbox
