@@ -136,9 +136,17 @@ class FPVFollowController:
         frame_cx = frame_w * 0.5 + self.sys_cfg.offsets.horizontal_offset_norm * half_w
         frame_cy = frame_h * 0.5 + self.sys_cfg.offsets.vertical_offset_norm * half_h
 
-        # Aim point normalized relative to offset frame center [-1.0..1.0]
-        nx = clamp((traj.aim_cx - frame_cx) / half_w, -1.0, 1.0)
-        ny = clamp((traj.aim_cy - frame_cy) / half_h, -1.0, 1.0)
+        # Steer to the LOCK BOX CENTER only (no Kalman lead / green aim point)
+        if bbox_xywh is not None:
+            box_cx = float(bbox_xywh[0]) + float(bbox_xywh[2]) * 0.5
+            box_cy = float(bbox_xywh[1]) + float(bbox_xywh[3]) * 0.5
+        else:
+            sb = traj.smoothed_bbox
+            box_cx = sb[0] + sb[2] * 0.5
+            box_cy = sb[1] + sb[3] * 0.5
+
+        nx = clamp((box_cx - frame_cx) / half_w, -1.0, 1.0)
+        ny = clamp((box_cy - frame_cy) / half_h, -1.0, 1.0)
 
         # PID calculations:
         # yaw_pid controls horizontal error nx (left/right yaw rotation)

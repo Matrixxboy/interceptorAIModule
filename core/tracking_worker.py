@@ -601,11 +601,6 @@ class TrackingWorkerThread(QThread):
             cv2.circle(frame, (obj_cx, obj_cy), 4, (0, 255, 255), -1)
             cv2.line(frame, (cx, cy), (obj_cx, obj_cy), (255, 0, 255), 1)
 
-            if self.controller.last_trajectory:
-                aim_x = int(self.controller.last_trajectory.aim_cx)
-                aim_y = int(self.controller.last_trajectory.aim_cy)
-                cv2.circle(frame, (aim_x, aim_y), 4, (0, 255, 0), -1)
-
             tid = self.active_target.target_id if self.active_target else "---"
             label_y = max(16, by - 8)
             cv2.putText(
