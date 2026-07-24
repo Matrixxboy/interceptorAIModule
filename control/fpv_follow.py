@@ -117,9 +117,18 @@ class FPVFollowController:
         if bbox_xywh is None and not self.motion_predictor.kalman.initialized:
             return self.fade_to_mid(base_throttle=base_throttle)
 
-        # Update distance estimation using bbox width
-        curr_w_px = traj.smoothed_bbox[2] if traj.smoothed_bbox[2] > 0 else (bbox_xywh[2] if bbox_xywh else 50.0)
-        dist_est = self.distance_estimator.compute_following_control(curr_w_px, dt)
+        # Distance from calibrated axis (width / height / max / diag)
+        from estimation.distance_calib import bbox_size_px
+
+        if traj.smoothed_bbox[2] > 0 and traj.smoothed_bbox[3] > 0:
+            size_src = traj.smoothed_bbox
+        elif bbox_xywh is not None:
+            size_src = bbox_xywh
+        else:
+            size_src = (0.0, 0.0, 50.0, 50.0)
+        axis = getattr(self.sys_cfg.distance, "size_axis", "width") or "width"
+        size_px = bbox_size_px(size_src, axis)
+        dist_est = self.distance_estimator.compute_following_control(size_px, dt)
         self.last_distance = dist_est
 
         half_w = max(1.0, frame_w * 0.5)

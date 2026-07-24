@@ -30,6 +30,33 @@ class VideoDisplayWidget(QLabel):
         self.end_point = QPoint()
         self.current_frame: np.ndarray | None = None
 
+    def _content_rect(self) -> QRect:
+        """Letterboxed image rect inside the widget (KeepAspectRatio)."""
+        if self.current_frame is None:
+            return self.rect()
+        img_h, img_w = self.current_frame.shape[:2]
+        widget_w = max(1, self.width())
+        widget_h = max(1, self.height())
+        scale = min(widget_w / max(1, img_w), widget_h / max(1, img_h))
+        disp_w = max(1, int(round(img_w * scale)))
+        disp_h = max(1, int(round(img_h * scale)))
+        ox = (widget_w - disp_w) // 2
+        oy = (widget_h - disp_h) // 2
+        return QRect(ox, oy, disp_w, disp_h)
+
+    def _widget_to_image(self, pos: QPoint) -> tuple[int, int] | None:
+        if self.current_frame is None:
+            return None
+        content = self._content_rect()
+        if not content.contains(pos):
+            return None
+        img_h, img_w = self.current_frame.shape[:2]
+        ix = int((pos.x() - content.x()) * img_w / max(1, content.width()))
+        iy = int((pos.y() - content.y()) * img_h / max(1, content.height()))
+        ix = max(0, min(img_w - 1, ix))
+        iy = max(0, min(img_h - 1, iy))
+        return ix, iy
+
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
             self.dragging = True
@@ -47,29 +74,19 @@ class VideoDisplayWidget(QLabel):
             self.dragging = False
             self.end_point = event.pos()
 
-            # Map widget coordinates to image coordinates
-            rect = self._normalize_rect(self.start_point, self.end_point)
-            if rect.width() > 10 and rect.height() > 10 and self.current_frame is not None:
-                img_h, img_w = self.current_frame.shape[:2]
-                disp_w = self.width()
-                disp_h = self.height()
-
-                scale_x = img_w / max(1, disp_w)
-                scale_y = img_h / max(1, disp_h)
-
-                ix = int(rect.x() * scale_x)
-                iy = int(rect.y() * scale_y)
-                iw = int(rect.width() * scale_x)
-                ih = int(rect.height() * scale_y)
-
-                self.roi_selected.emit(ix, iy, iw, ih)
-            elif rect.width() <= 5 and rect.height() <= 5 and self.current_frame is not None:
-                img_h, img_w = self.current_frame.shape[:2]
-                disp_w = self.width()
-                disp_h = self.height()
-                ix = int(event.pos().x() * (img_w / max(1, disp_w)))
-                iy = int(event.pos().y() * (img_h / max(1, disp_h)))
-                self.point_clicked.emit(ix, iy)
+            p0 = self._widget_to_image(self.start_point)
+            p1 = self._widget_to_image(self.end_point)
+            if p0 is not None and p1 is not None:
+                ix0, iy0 = p0
+                ix1, iy1 = p1
+                ix = min(ix0, ix1)
+                iy = min(iy0, iy1)
+                iw = abs(ix1 - ix0)
+                ih = abs(iy1 - iy0)
+                if iw > 10 and ih > 10:
+                    self.roi_selected.emit(ix, iy, iw, ih)
+                elif iw <= 5 and ih <= 5:
+                    self.point_clicked.emit(ix0, iy0)
 
             self.update()
 
@@ -81,13 +98,27 @@ class VideoDisplayWidget(QLabel):
         return QRect(x, y, w, h)
 
     def update_frame(self, frame_bgr: np.ndarray) -> None:
+        if frame_bgr is None or getattr(frame_bgr, "size", 0) == 0:
+            return
+        # Own a contiguous copy — QImage does not own the numpy buffer.
+        frame_bgr = np.ascontiguousarray(frame_bgr)
         self.current_frame = frame_bgr
-        h, w, ch = frame_bgr.shape
-        bytes_per_line = ch * w
-        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        qimg = QImage(frame_rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+        h, w = frame_bgr.shape[:2]
+        if h < 2 or w < 2:
+            return
+        frame_rgb = np.ascontiguousarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
+        bytes_per_line = int(frame_rgb.strides[0])
+        qimg = QImage(
+            frame_rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888
+        ).copy()
         pix = QPixmap.fromImage(qimg)
-        self.setPixmap(pix.scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        self.setPixmap(
+            pix.scaled(
+                self.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
 
     def paintEvent(self, event) -> None:
         super().paintEvent(event)

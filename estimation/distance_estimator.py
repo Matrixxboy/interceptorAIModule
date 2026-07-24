@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from config import DistanceConfig
+from estimation.distance_calib import bbox_size_px, estimate_distance_m
 
 
 @dataclass
@@ -30,10 +31,16 @@ class DistanceEstimator:
         self._prev_err = 0.0
 
     def estimate_distance(self, bbox_width_px: float) -> float:
-        w_px = max(1.0, float(bbox_width_px))
-        f = max(100.0, float(self.cfg.focal_length_px))
-        w_m = max(0.01, float(self.cfg.known_object_width_m))
-        return (f * w_m) / w_px
+        """Pinhole distance from a single pixel size along the calibrated axis."""
+        return estimate_distance_m(
+            bbox_width_px,
+            self.cfg.focal_length_px,
+            self.cfg.known_object_width_m,
+        )
+
+    def estimate_distance_from_bbox(self, bbox_xywh: tuple[float, float, float, float]) -> float:
+        size_px = bbox_size_px(bbox_xywh, getattr(self.cfg, "size_axis", "width") or "width")
+        return self.estimate_distance(size_px)
 
     def compute_following_control(
         self,
@@ -44,10 +51,9 @@ class DistanceEstimator:
         dist_m = self.estimate_distance(bbox_width_px)
         dt = max(1e-4, float(dt))
 
-        # Error: Positive means target is further than desired distance -> drone should move forward (pitch down/forward)
+        # Error: Positive means target is further than desired distance -> drone should move forward
         dist_err = dist_m - c.desired_distance_m
 
-        # Safety status check
         if dist_m < c.min_safe_distance_m:
             status = "TOO_CLOSE"
             is_safe = False
@@ -58,7 +64,6 @@ class DistanceEstimator:
             status = "NOMINAL"
             is_safe = True
 
-        # PID distance loop for forward/backward pitch offset
         self._integral_err += dist_err * dt
         self._integral_err = max(-2.0, min(2.0, self._integral_err))
 
@@ -67,7 +72,6 @@ class DistanceEstimator:
 
         pitch_offset = (c.kp * dist_err) + (c.ki * self._integral_err) + (c.kd * d_err)
 
-        # Safety override: if too close, force backward pitch offset
         if dist_m < c.min_safe_distance_m:
             overclose_ratio = (c.min_safe_distance_m - dist_m) / max(0.1, c.min_safe_distance_m)
             pitch_offset = -abs(c.max_pitch_offset) * (1.0 + overclose_ratio)

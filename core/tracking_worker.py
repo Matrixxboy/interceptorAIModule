@@ -348,184 +348,195 @@ class TrackingWorkerThread(QThread):
             h, w = frame.shape[:2]
             cx, cy = w // 2, h // 2
 
-            if self.pending_roi is not None:
-                rx, ry, rw, rh = self.pending_roi
-                self.hybrid.lock_xywh(frame, (rx, ry, rw, rh), label="manual")
-                self.controller.reset()
-                self.assist_enabled = True
-                self._start_target_lock(frame, (rx, ry, rw, rh), "manual", "manual")
-                self.pending_roi = None
+            try:
+                if self.pending_roi is not None:
+                    rx, ry, rw, rh = self.pending_roi
+                    self.hybrid.lock_xywh(frame, (rx, ry, rw, rh), label="manual")
+                    self.controller.reset()
+                    self.assist_enabled = True
+                    self._start_target_lock(frame, (rx, ry, rw, rh), "manual", "manual")
+                    self.pending_roi = None
 
-            if self.pending_auto_lock:
-                best = self.hybrid.lock_best(frame)
-                if best and self.hybrid._bbox:
-                    self._start_target_lock(frame, self.hybrid._bbox, "yolo", self.hybrid._label or "yolo")
-                self.controller.reset()
-                self.assist_enabled = True
-                self.pending_auto_lock = False
+                if self.pending_auto_lock:
+                    best = self.hybrid.lock_best(frame)
+                    if best and self.hybrid._bbox:
+                        self._start_target_lock(
+                            frame, self.hybrid._bbox, "yolo", self.hybrid._label or "yolo"
+                        )
+                    self.controller.reset()
+                    self.assist_enabled = True
+                    self.pending_auto_lock = False
 
-            dets = []
-            locked = False
-            bbox = None
-            conf = 0.0
-            source = "none"
+                dets = []
+                locked = False
+                bbox = None
+                conf = 0.0
+                source = "none"
 
-            if self.hybrid.locked:
-                res = self.hybrid.update(frame)
-                dets = res.detections
-                if res.ok and res.bbox_xywh is not None:
-                    locked = True
-                    bbox = res.bbox_xywh
-                    conf = res.conf
-                    source = res.source
+                if self.hybrid.locked:
+                    res = self.hybrid.update(frame)
+                    dets = res.detections
+                    if res.ok and res.bbox_xywh is not None:
+                        locked = True
+                        bbox = res.bbox_xywh
+                        conf = res.conf
+                        source = res.source
 
-            if locked and self.active_target:
-                vx, vy = self.controller.motion_predictor.kalman.get_velocity()
-                color_hist = None
-                if self.hybrid._target_hist is not None:
-                    color_hist = self.hybrid._target_hist.flatten().tolist()[:64]
+                # Local ref — UI unlock can clear self.active_target mid-frame
+                target = self.active_target
+                if locked and target is not None:
+                    vx, vy = self.controller.motion_predictor.kalman.get_velocity()
+                    color_hist = None
+                    if self.hybrid._target_hist is not None:
+                        color_hist = self.hybrid._target_hist.flatten().tolist()[:64]
+                    dist_m = 0.0
+                    if self.controller.last_distance:
+                        dist_m = self.controller.last_distance.distance_m
+                    target.update_frame(
+                        bbox_xywh=bbox,
+                        confidence=conf,
+                        source=source,
+                        vx=vx,
+                        vy=vy,
+                        distance_m=dist_m,
+                        color_hist=color_hist,
+                    )
+                    self.target_store.update_active(target, frame, bbox_xywh=bbox)
+                    if self.assist_enabled and not self._was_locked:
+                        target.add_event(
+                            "Drone Following",
+                            confidence=conf,
+                            drone_state="assist_enabled",
+                            system_response="FPV follow controller active",
+                        )
+                elif self._was_locked and not locked and target is not None:
+                    self.target_store.mark_lost(target)
+                    self.sys_log.log(
+                        LogCategory.TRACKING,
+                        f"Target {target.target_id} temporarily lost",
+                        severity=LogSeverity.WARNING,
+                        target_id=target.target_id,
+                    )
+                elif not self._was_locked and locked and target is not None:
+                    if target.status == TargetStatus.LOST:
+                        self.target_store.mark_reacquired(target)
+
+                self._was_locked = locked
+
                 dist_m = 0.0
                 if self.controller.last_distance:
                     dist_m = self.controller.last_distance.distance_m
-                self.active_target.update_frame(
-                    bbox_xywh=bbox,
+
+                safety_state = self.failsafe.evaluate(locked, conf, dist_m if locked else None)
+
+                roll, pitch, yaw, throttle = 1500, 1500, 1500, self.throttle_value
+                channel_overrides: dict[int, int] = {}
+                if self.sys_config.joystick.enabled and self.joystick_mgr and self.joystick_mgr.state.connected:
+                    js = self.joystick_mgr.state
+                    roll, pitch, yaw, throttle = js.roll_pwm, js.pitch_pwm, js.yaw_pwm, js.throttle_pwm
+
+                    used_rc: set[int] = set()
+                    for i, aux_cfg in enumerate(self.sys_config.joystick.aux_channels):
+                        rc = int(aux_cfg.rc_channel)
+                        if rc < 0 or rc > 15 or rc in used_rc:
+                            continue
+                        used_rc.add(rc)
+                        pwm = js.aux_pwm.get(
+                            f"#{i}",
+                            js.aux_pwm.get(aux_cfg.name, aux_cfg.center_val),
+                        )
+                        channel_overrides[rc] = int(pwm)
+
+                    arm_ch = self.sys_config.aux_channels.arm_channel
+                    arm_pwm = channel_overrides.get(
+                        arm_ch,
+                        js.aux_pwm.get("Arm", self.sys_config.aux_channels.arm_low),
+                    )
+                    if arm_pwm >= self.sys_config.aux_channels.arm_high - 50:
+                        self.arm_requested = True
+                    elif arm_pwm <= self.sys_config.aux_channels.arm_low + 50:
+                        self.arm_requested = False
+                elif locked and self.assist_enabled and not safety_state.override_active:
+                    roll, pitch, yaw, throttle = self.controller.update(
+                        bbox, w, h, base_throttle=self.throttle_value
+                    )
+                else:
+                    roll, pitch, yaw, throttle = self.controller.fade_to_mid(
+                        base_throttle=self.throttle_value
+                    )
+
+                if now - last_msp_send >= msp_interval:
+                    last_msp_send = now
+                    if self.is_connected and hasattr(self, "fc") and self.fc.is_connected():
+                        if hasattr(self.fc, "set_channel_overrides"):
+                            self.fc.set_channel_overrides(channel_overrides)
+                        if self.arm_requested != getattr(self.fc, "_armed", False):
+                            if self.arm_requested:
+                                self.fc.arm()
+                            else:
+                                self.fc.disarm()
+
+                        self.fc.send_control(roll=roll, pitch=pitch, yaw=yaw, throttle=throttle)
+                        if self.frame_count % 30 == 0:
+                            self.sys_log.log(
+                                LogCategory.DRONE,
+                                f"Follow Control -> R:{roll} P:{pitch} Y:{yaw} T:{throttle} | ARM:{'YES' if self.arm_requested else 'NO'} | AUX:{channel_overrides}",
+                                module="FC Link",
+                            )
+
+                self._render_hud(
+                    frame, locked, bbox, conf, source, safety_state,
+                    roll, pitch, yaw, throttle, dist_m, w, h,
+                )
+
+                err_x = 0.0
+                err_y = 0.0
+                if bbox is not None:
+                    err_x = (bbox[0] + bbox[2] * 0.5) - cx
+                    err_y = (bbox[1] + bbox[3] * 0.5) - cy
+
+                rec = self.logger.log(
+                    frame_idx=self.frame_count,
+                    locked=locked,
                     confidence=conf,
                     source=source,
-                    vx=vx,
-                    vy=vy,
+                    error_x=err_x,
+                    error_y=err_y,
+                    bbox_xywh=bbox,
                     distance_m=dist_m,
-                    color_hist=color_hist,
+                    vx=self.controller.motion_predictor.kalman.get_velocity()[0],
+                    vy=self.controller.motion_predictor.kalman.get_velocity()[1],
+                    roll=roll,
+                    pitch=pitch,
+                    yaw=yaw,
+                    throttle=self.throttle_value,
+                    failsafe=safety_state.reason,
                 )
-                self.target_store.update_active(self.active_target, frame, bbox_xywh=bbox)
-                if self.assist_enabled and not self._was_locked:
-                    self.active_target.add_event(
-                        "Drone Following",
-                        confidence=conf,
-                        drone_state="assist_enabled",
-                        system_response="FPV follow controller active",
+
+                frame_ms = (time.time() - frame_start) * 1000
+                self._fps_window.append(1.0 / max(dt, 0.001))
+                if len(self._fps_window) > 30:
+                    self._fps_window.pop(0)
+                fps = self.current_fps
+                self.fps_updated.emit(fps)
+
+                if self.frame_count % 60 == 0:
+                    self.sys_log.log(
+                        LogCategory.PERFORMANCE,
+                        f"Pipeline running @ {fps:.1f} FPS",
+                        fps=fps,
+                        latency_ms=frame_ms,
                     )
-            elif self._was_locked and not locked and self.active_target:
-                self.target_store.mark_lost(self.active_target)
+
+                self.frame_processed.emit(frame, rec)
+            except Exception as exc:
                 self.sys_log.log(
-                    LogCategory.TRACKING,
-                    f"Target {self.active_target.target_id} temporarily lost",
-                    severity=LogSeverity.WARNING,
-                    target_id=self.active_target.target_id,
-                )
-            elif not self._was_locked and locked and self.active_target:
-                if self.active_target.status == TargetStatus.LOST:
-                    self.target_store.mark_reacquired(self.active_target)
-
-            self._was_locked = locked
-
-            dist_m = 0.0
-            if self.controller.last_distance:
-                dist_m = self.controller.last_distance.distance_m
-
-            safety_state = self.failsafe.evaluate(locked, conf, dist_m if locked else None)
-
-            roll, pitch, yaw, throttle = 1500, 1500, 1500, self.throttle_value
-            channel_overrides: dict[int, int] = {}
-            if self.sys_config.joystick.enabled and self.joystick_mgr and self.joystick_mgr.state.connected:
-                js = self.joystick_mgr.state
-                roll, pitch, yaw, throttle = js.roll_pwm, js.pitch_pwm, js.yaw_pwm, js.throttle_pwm
-
-                # One FC channel ← one AUX row. Skip duplicate rc_channel mappings.
-                used_rc: set[int] = set()
-                for i, aux_cfg in enumerate(self.sys_config.joystick.aux_channels):
-                    rc = int(aux_cfg.rc_channel)
-                    if rc < 0 or rc > 15:
-                        continue
-                    if rc in used_rc:
-                        continue
-                    # Never let AUX stomp primary sticks (CH1–CH4) unless explicitly CH5+
-                    # (still allow if user set it — but prefer CH5+)
-                    used_rc.add(rc)
-                    pwm = js.aux_pwm.get(
-                        f"#{i}",
-                        js.aux_pwm.get(aux_cfg.name, aux_cfg.center_val),
-                    )
-                    channel_overrides[rc] = int(pwm)
-
-                arm_ch = self.sys_config.aux_channels.arm_channel
-                arm_pwm = channel_overrides.get(
-                    arm_ch,
-                    js.aux_pwm.get("Arm", self.sys_config.aux_channels.arm_low),
-                )
-                if arm_pwm >= self.sys_config.aux_channels.arm_high - 50:
-                    self.arm_requested = True
-                elif arm_pwm <= self.sys_config.aux_channels.arm_low + 50:
-                    self.arm_requested = False
-            elif locked and self.assist_enabled and not safety_state.override_active:
-                roll, pitch, yaw, throttle = self.controller.update(
-                    bbox, w, h, base_throttle=self.throttle_value
-                )
-            else:
-                roll, pitch, yaw, throttle = self.controller.fade_to_mid(
-                    base_throttle=self.throttle_value
+                    LogCategory.SYSTEM,
+                    f"Frame processing error (continuing): {exc}",
+                    severity=LogSeverity.ERROR,
+                    module="TrackingWorker",
                 )
 
-            if now - last_msp_send >= msp_interval:
-                last_msp_send = now
-                if self.is_connected and hasattr(self, "fc") and self.fc.is_connected():
-                    if hasattr(self.fc, "set_channel_overrides"):
-                        self.fc.set_channel_overrides(channel_overrides)
-                    if self.arm_requested != getattr(self.fc, "_armed", False):
-                        if self.arm_requested:
-                            self.fc.arm()
-                        else:
-                            self.fc.disarm()
-
-                    self.fc.send_control(roll=roll, pitch=pitch, yaw=yaw, throttle=throttle)
-                    if self.frame_count % 30 == 0:
-                        self.sys_log.log(
-                            LogCategory.DRONE,
-                            f"Follow Control -> R:{roll} P:{pitch} Y:{yaw} T:{throttle} | ARM:{'YES' if self.arm_requested else 'NO'} | AUX:{channel_overrides}",
-                            module="FC Link",
-                        )
-
-            self._render_hud(frame, locked, bbox, conf, source, safety_state, roll, pitch, yaw, throttle, dist_m, w, h)
-
-            err_x = 0.0
-            err_y = 0.0
-            if bbox is not None:
-                err_x = (bbox[0] + bbox[2] * 0.5) - cx
-                err_y = (bbox[1] + bbox[3] * 0.5) - cy
-
-            rec = self.logger.log(
-                frame_idx=self.frame_count,
-                locked=locked,
-                confidence=conf,
-                source=source,
-                error_x=err_x,
-                error_y=err_y,
-                bbox_xywh=bbox,
-                distance_m=dist_m,
-                vx=self.controller.motion_predictor.kalman.get_velocity()[0],
-                vy=self.controller.motion_predictor.kalman.get_velocity()[1],
-                roll=roll,
-                pitch=pitch,
-                yaw=yaw,
-                throttle=self.throttle_value,
-                failsafe=safety_state.reason,
-            )
-
-            frame_ms = (time.time() - frame_start) * 1000
-            self._fps_window.append(1.0 / max(dt, 0.001))
-            if len(self._fps_window) > 30:
-                self._fps_window.pop(0)
-            fps = self.current_fps
-            self.fps_updated.emit(fps)
-
-            if self.frame_count % 60 == 0:
-                self.sys_log.log(
-                    LogCategory.PERFORMANCE,
-                    f"Pipeline running @ {fps:.1f} FPS",
-                    fps=fps,
-                    latency_ms=frame_ms,
-                )
-
-            self.frame_processed.emit(frame, rec)
             time.sleep(0.01)
 
         self.disconnect_serial()

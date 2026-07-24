@@ -111,6 +111,9 @@ def main() -> None:
     cfg = SystemConfig()
     if args.config:
         cfg = SystemConfig.load_json(args.config)
+    else:
+        from estimation.distance_calib import load_distance_calib
+        load_distance_calib(cfg)
 
     if args.cli:
         run_cli(cfg)

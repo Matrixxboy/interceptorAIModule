@@ -95,6 +95,7 @@ class ParametersPanel(QWidget):
         self.sp_min_dist = _dspin(c.distance.min_safe_distance_m, 0.2, 20.0, 0.2, 1)
         self.sp_max_dist = _dspin(c.distance.max_follow_distance_m, 2.0, 100.0, 1.0, 1)
         self.sp_known_w = _dspin(c.distance.known_object_width_m, 0.01, 10.0, 0.05, 2)
+        self.sp_focal = _dspin(c.distance.focal_length_px, 50.0, 20000.0, 10.0, 1)
         self.sp_deadzone = _dspin(c.offsets.deadzone_norm, 0.0, 0.2, 0.005, 3)
         self.sp_horiz_off = _dspin(c.offsets.horizontal_offset_norm, -0.5, 0.5, 0.05, 2)
         self.sp_vert_off = _dspin(c.offsets.vertical_offset_norm, -0.5, 0.5, 0.05, 2)
@@ -109,12 +110,13 @@ class ParametersPanel(QWidget):
             (0, 2, "Min safe (m)", self.sp_min_dist),
             (1, 0, "Max range (m)", self.sp_max_dist),
             (1, 2, "Object width (m)", self.sp_known_w),
-            (2, 0, "Deadzone", self.sp_deadzone),
-            (2, 2, "Lead time (s)", self.sp_lead),
-            (3, 0, "H offset", self.sp_horiz_off),
-            (3, 2, "V offset", self.sp_vert_off),
-            (4, 0, "Min confidence", self.sp_conf_thresh),
-            (4, 2, "Max lost frames", self.sp_max_lost),
+            (2, 0, "Focal length (px)", self.sp_focal),
+            (2, 2, "Deadzone", self.sp_deadzone),
+            (3, 0, "Lead time (s)", self.sp_lead),
+            (3, 2, "H offset", self.sp_horiz_off),
+            (4, 0, "V offset", self.sp_vert_off),
+            (4, 2, "Min confidence", self.sp_conf_thresh),
+            (5, 0, "Max lost frames", self.sp_max_lost),
         ]
         for row, col, text, widget in fields:
             grid.addWidget(_lbl(text), row, col)
@@ -122,7 +124,7 @@ class ParametersPanel(QWidget):
             widget.valueChanged.connect(self._on_param_change)
 
         self.chk_kalman.toggled.connect(self._on_param_change)
-        grid.addWidget(self.chk_kalman, 5, 0, 1, 4)
+        grid.addWidget(self.chk_kalman, 6, 0, 1, 4)
 
         root.addWidget(box)
         root.addStretch(1)
@@ -141,6 +143,7 @@ class ParametersPanel(QWidget):
         self.sys_config.distance.min_safe_distance_m = self.sp_min_dist.value()
         self.sys_config.distance.max_follow_distance_m = self.sp_max_dist.value()
         self.sys_config.distance.known_object_width_m = self.sp_known_w.value()
+        self.sys_config.distance.focal_length_px = self.sp_focal.value()
         self.sys_config.offsets.deadzone_norm = self.sp_deadzone.value()
         self.sys_config.offsets.horizontal_offset_norm = self.sp_horiz_off.value()
         self.sys_config.offsets.vertical_offset_norm = self.sp_vert_off.value()
@@ -170,7 +173,7 @@ class ParametersPanel(QWidget):
         self.sys_config = cfg
         widgets = [
             self.sp_desired_dist, self.sp_min_dist, self.sp_max_dist, self.sp_known_w,
-            self.sp_deadzone, self.sp_horiz_off, self.sp_vert_off, self.sp_lead,
+            self.sp_focal, self.sp_deadzone, self.sp_horiz_off, self.sp_vert_off, self.sp_lead,
             self.sp_conf_thresh, self.sp_max_lost, self.chk_kalman,
         ]
         for w in widgets:
@@ -179,6 +182,7 @@ class ParametersPanel(QWidget):
         self.sp_min_dist.setValue(cfg.distance.min_safe_distance_m)
         self.sp_max_dist.setValue(cfg.distance.max_follow_distance_m)
         self.sp_known_w.setValue(cfg.distance.known_object_width_m)
+        self.sp_focal.setValue(cfg.distance.focal_length_px)
         self.sp_deadzone.setValue(cfg.offsets.deadzone_norm)
         self.sp_horiz_off.setValue(cfg.offsets.horizontal_offset_norm)
         self.sp_vert_off.setValue(cfg.offsets.vertical_offset_norm)

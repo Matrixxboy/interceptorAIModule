@@ -40,7 +40,8 @@ class PIDAxisConfig:
 @dataclass
 class DistanceConfig:
     focal_length_px: float = 800.0  # Camera focal length in pixels
-    known_object_width_m: float = 0.30  # Physical width of object (e.g. 30 cm drone)
+    known_object_width_m: float = 0.30  # Physical size of object along size_axis (meters)
+    size_axis: str = "max"  # "width" | "height" | "max" | "diag" — which bbox dim → distance
     desired_distance_m: float = 5.0  # Safe nominal follow distance in meters
     min_safe_distance_m: float = 2.0  # Dangerously close threshold
     max_follow_distance_m: float = 25.0  # Maximum follow range

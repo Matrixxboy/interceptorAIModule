@@ -276,7 +276,6 @@ class HybridYoloLockTracker:
             self._bbox = xywh
             self._lost = 0
             return HybridResult(True, xywh, source, self._label, self._conf, dets)
-
         # Grace period: Coast with last known box during brief dropouts
         self._lost += 1
         if self._lost <= self.max_hold_frames and self._bbox is not None:
@@ -284,3 +283,4 @@ class HybridYoloLockTracker:
 
         self._locked = False
         return HybridResult(False, self._bbox, "lost", self._label, 0.0, dets)
+

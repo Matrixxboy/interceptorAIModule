@@ -36,6 +36,7 @@ from core.tracking_worker import TrackingWorkerThread
 from database.target_store import TargetStore
 from gui.calibration_wizard import CalibrationWizard
 from gui.pages.dashboard_page import DashboardPage
+from gui.pages.distance_calib_page import DistanceCalibPage
 from gui.pages.joystick_page import JoystickPage
 from gui.pages.live_feed_page import LiveFeedPage
 from gui.pages.logs_page import LogsPage
@@ -46,6 +47,7 @@ from gui.pid_panel import PIDTuningPanel
 from gui.style import ARJUNA_THEME_QSS
 from gui.widgets.page_header import StatusPill
 from sys_logging.system_logger import LogCategory, SystemLogger
+from estimation.distance_calib import load_distance_calib
 
 
 NAV_ITEMS: list[tuple[str, str]] = [
@@ -55,8 +57,9 @@ NAV_ITEMS: list[tuple[str, str]] = [
     ("telemetry", "04  Flight Telemetry"),
     ("joystick", "05  Remote Control"),
     ("logs", "06  Logs"),
-    ("calibration", "07  Calibration"),
-    ("settings", "08  Settings"),
+    ("distance_calib", "07  Distance Calib"),
+    ("calibration", "08  Calibration"),
+    ("settings", "09  Settings"),
 ]
 
 
@@ -66,6 +69,7 @@ class ArjunaShell(QMainWindow):
     def __init__(self, sys_config: SystemConfig | None = None) -> None:
         super().__init__()
         self.sys_config = sys_config or SystemConfig()
+        load_distance_calib(self.sys_config)
         self.target_store = TargetStore()
         self.sys_log = SystemLogger()
         self.joystick_mgr = JoystickManager(self.sys_config)
@@ -179,6 +183,8 @@ class ArjunaShell(QMainWindow):
         self.page_joystick = JoystickPage(self.sys_config, self.joystick_mgr)
         self.page_logs = LogsPage(self.sys_log)
         self.page_telemetry = TelemetryPage()
+        self.page_distance_calib = DistanceCalibPage(self.worker, self.sys_config)
+        self.page_distance_calib.calib_saved.connect(self._on_config_updated)
 
         self._register_page("dashboard", self.page_dashboard)
         self._register_page("live_feed", self.page_live_feed)
@@ -186,8 +192,9 @@ class ArjunaShell(QMainWindow):
         self._register_page("joystick", self.page_joystick)
         self._register_page("logs", self.page_logs)
         self._register_page("telemetry", self.page_telemetry)
+        self._register_page("distance_calib", self.page_distance_calib)
 
-        # Removed stub pages as part of UI streamlining
+        # Stick / follow calibration wizard (legacy)
 
         calib_widget = QWidget()
         calib_layout = QVBoxLayout(calib_widget)
@@ -304,6 +311,10 @@ class ArjunaShell(QMainWindow):
             self.page_live_feed.pid_panel.load_config(self.sys_config)
         if hasattr(self.page_live_feed, "params_panel"):
             self.page_live_feed.params_panel.load_config(self.sys_config)
+        if hasattr(self, "page_distance_calib"):
+            self.page_distance_calib._refresh_status_labels()
+        if hasattr(self, "settings_page") and hasattr(self.settings_page, "panel_params"):
+            self.settings_page.panel_params.load_config(self.sys_config)
 
     def _open_calibration(self) -> None:
         from core.config_manager import ConfigManager

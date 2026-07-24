@@ -1,18 +1,27 @@
 """
-Live distance lock test — clear calibration + stronger pixel lock.
+Live distance lock — accurate pinhole distance after calibration.
+
+WHY IT WAS WRONG BEFORE
+  The tracker used a fixed-size template, so the box did not shrink/grow
+  when you moved. Distance = (W * f) / pixels needs the box size to change.
+
+FIX
+  Multi-scale template match (box scales with distance) + smoothed size.
 
 CONTROLS
-  Drag box on the video  = lock (draw tightly around the object)
-  C  = calibrate (answer 2 simple questions in the terminal)
-  R  = unlock
-  A  = size axis (width / height / max)
-  S  = save calibration
-  Q  = quit
+  Drag tight box  = lock
+  C               = calibrate (tape measure + object width in CM)
+  R               = unlock
+  A               = measure axis: width / height / max
+  S               = save calib
+  Q               = quit
 
-CALIBRATION (press C while locked) — two numbers only:
-  1) DISTANCE  = how far YOU are from the object (meters), e.g. 1.0 = one meter
-  2) WIDTH_CM  = how wide the object is in CENTIMETERS, e.g. phone~7, bottle~7, person~45
-     NOT meters. NOT the distance.
+CALIBRATION
+  1) Stand at a known distance (tape)
+  2) Drag a TIGHT box on the object (edges of the real object only)
+  3) Press C
+  4) Q1 = distance in METERS (e.g. 1)
+  5) Q2 = object size in CENTIMETERS along the box (e.g. phone width 7)
 
 Run:
   python scripts/test_live_distance_lock.py
@@ -26,6 +35,7 @@ import json
 import math
 import sys
 import time
+from collections import deque
 from pathlib import Path
 
 import cv2
@@ -43,29 +53,27 @@ CALIB_PATH = ROOT / "presets" / "distance_calib.json"
 
 
 # ---------------------------------------------------------------------------
-# Stronger lock: CSRT + template matching refine
+# Multi-scale lock — box size changes with distance (required for accuracy)
 # ---------------------------------------------------------------------------
 
-class PixelLockTracker:
-    """Keeps the lock on the selected pixels more reliably than CSRT alone."""
+class ScaleAwareLock:
+    """Template lock that searches across scales so pixel size tracks distance."""
 
     def __init__(self) -> None:
-        self._cv_tracker = None
-        self._template: np.ndarray | None = None
+        self._template: np.ndarray | None = None  # grayscale
         self._bbox: tuple[float, float, float, float] | None = None
-        self._frame_shape: tuple[int, int] | None = None
+        self._base_w = 0.0
+        self._base_h = 0.0
+        self._scale = 1.0
         self._misses = 0
+        self._csrt = None
 
     @staticmethod
-    def _create_cv_tracker():
+    def _make_csrt():
         if hasattr(cv2, "TrackerCSRT_create"):
             return cv2.TrackerCSRT_create()
         if hasattr(cv2, "legacy") and hasattr(cv2.legacy, "TrackerCSRT_create"):
             return cv2.legacy.TrackerCSRT_create()
-        if hasattr(cv2, "TrackerKCF_create"):
-            return cv2.TrackerKCF_create()
-        if hasattr(cv2, "legacy") and hasattr(cv2.legacy, "TrackerKCF_create"):
-            return cv2.legacy.TrackerKCF_create()
         return None
 
     def init(self, frame_bgr: np.ndarray, bbox_xywh: tuple[int, int, int, int]) -> bool:
@@ -73,103 +81,107 @@ class PixelLockTracker:
         fh, fw = frame_bgr.shape[:2]
         x = max(0, min(x, fw - 2))
         y = max(0, min(y, fh - 2))
-        w = max(8, min(w, fw - x))
-        h = max(8, min(h, fh - y))
-
+        w = max(12, min(w, fw - x))
+        h = max(12, min(h, fh - y))
         patch = frame_bgr[y : y + h, x : x + w]
         if patch.size == 0:
             return False
-
         self._template = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
         self._bbox = (float(x), float(y), float(w), float(h))
-        self._frame_shape = (fh, fw)
+        self._base_w = float(w)
+        self._base_h = float(h)
+        self._scale = 1.0
         self._misses = 0
-
-        self._cv_tracker = self._create_cv_tracker()
-        if self._cv_tracker is not None:
-            self._cv_tracker.init(frame_bgr, (x, y, w, h))
+        self._csrt = self._make_csrt()
+        if self._csrt is not None:
+            self._csrt.init(frame_bgr, (x, y, w, h))
         return True
 
-    def _template_search(self, gray: np.ndarray) -> tuple[float, float, float, float] | None:
+    def _multiscale_match(self, gray: np.ndarray) -> tuple[float, float, float, float, float] | None:
+        """Returns (x, y, w, h, score) with scale-aware size."""
         if self._template is None or self._bbox is None:
             return None
         x, y, w, h = self._bbox
         fh, fw = gray.shape[:2]
-        tw, th = self._template.shape[1], self._template.shape[0]
+        tw0, th0 = self._template.shape[1], self._template.shape[0]
 
-        # Search window around last position (2x box, min 80px pad)
-        pad = max(80, int(max(w, h) * 1.2))
+        # Search scales around current scale (object nearer = larger)
+        scales = []
+        for s in np.linspace(max(0.45, self._scale * 0.70), min(2.4, self._scale * 1.35), 13):
+            scales.append(float(s))
+
+        pad = max(100, int(max(w, h) * 1.5))
         x0 = max(0, int(x) - pad)
         y0 = max(0, int(y) - pad)
         x1 = min(fw, int(x + w) + pad)
         y1 = min(fh, int(y + h) + pad)
         roi = gray[y0:y1, x0:x1]
-        if roi.shape[0] < th or roi.shape[1] < tw:
+        if roi.size == 0:
             return None
 
-        res = cv2.matchTemplate(roi, self._template, cv2.TM_CCOEFF_NORMED)
-        _, max_val, _, max_loc = cv2.minMaxLoc(res)
-        if max_val < 0.45:
-            return None
+        best = None  # (score, nx, ny, nw, nh, scale)
+        for s in scales:
+            tw = max(8, int(round(tw0 * s)))
+            th = max(8, int(round(th0 * s)))
+            if tw >= roi.shape[1] or th >= roi.shape[0]:
+                continue
+            tmpl = cv2.resize(self._template, (tw, th), interpolation=cv2.INTER_AREA)
+            res = cv2.matchTemplate(roi, tmpl, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, max_loc = cv2.minMaxLoc(res)
+            if best is None or max_val > best[0]:
+                best = (float(max_val), float(x0 + max_loc[0]), float(y0 + max_loc[1]), float(tw), float(th), s)
 
-        nx = float(x0 + max_loc[0])
-        ny = float(y0 + max_loc[1])
-        return (nx, ny, float(tw), float(th))
+        if best is None or best[0] < 0.42:
+            return None
+        score, nx, ny, nw, nh, s = best
+        self._scale = 0.7 * self._scale + 0.3 * s  # smooth scale
+        return (nx, ny, nw, nh, score)
 
     def update(self, frame_bgr: np.ndarray) -> tuple[bool, tuple[float, float, float, float] | None]:
         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-        cand_cv = None
+        ms = self._multiscale_match(gray)
 
-        if self._cv_tracker is not None:
-            ok, box = self._cv_tracker.update(frame_bgr)
+        csrt_box = None
+        if self._csrt is not None:
+            ok, box = self._csrt.update(frame_bgr)
             if ok:
-                cand_cv = tuple(float(v) for v in box)
+                csrt_box = tuple(float(v) for v in box)
 
-        cand_tm = self._template_search(gray)
-
-        # Prefer template when confident; else CSRT; else fail
-        chosen = None
-        if cand_tm is not None:
-            chosen = cand_tm
+        if ms is not None:
+            nx, ny, nw, nh, score = ms
+            # If CSRT agrees roughly on center, blend sizes for stability
+            if csrt_box is not None:
+                cx, cy, cw, ch = csrt_box
+                # Reject CSRT if size exploded (>2.5x) vs multi-scale
+                if 0.4 * nw < cw < 2.5 * nw and 0.4 * nh < ch < 2.5 * nh:
+                    nw = 0.65 * nw + 0.35 * cw
+                    nh = 0.65 * nh + 0.35 * ch
+                    nx = 0.65 * nx + 0.35 * cx
+                    ny = 0.65 * ny + 0.35 * cy
+            self._bbox = (nx, ny, nw, nh)
             self._misses = 0
-        elif cand_cv is not None:
-            chosen = cand_cv
+            return True, self._bbox
+
+        if csrt_box is not None:
+            # Cap CSRT size drift vs last known size
+            lx, ly, lw, lh = self._bbox if self._bbox else csrt_box
+            cx, cy, cw, ch = csrt_box
+            if cw > 3.0 * lw or ch > 3.0 * lh or cw < 0.3 * lw or ch < 0.3 * lh:
+                # Keep last size, only move center
+                self._bbox = (cx, cy, lw, lh)
+            else:
+                self._bbox = csrt_box
             self._misses = 0
-            # Periodically refresh template from CSRT box so lock adapts a bit
-            x, y, w, h = [int(v) for v in cand_cv]
-            fh, fw = frame_bgr.shape[:2]
-            if 0 <= x < fw and 0 <= y < fh and w > 4 and h > 4:
-                patch = frame_bgr[y : min(fh, y + h), x : min(fw, x + w)]
-                if patch.size > 0 and patch.shape[0] > 4 and patch.shape[1] > 4:
-                    # Slow template update (blend) to avoid drift
-                    new_t = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
-                    if self._template is not None and new_t.shape == self._template.shape:
-                        self._template = cv2.addWeighted(self._template, 0.85, new_t, 0.15, 0)
-        else:
-            self._misses += 1
-            if self._misses > 20:
-                return False, None
-            return True, self._bbox  # hold last box briefly
+            return True, self._bbox
 
-        self._bbox = chosen
-        return True, chosen
-
-    @property
-    def bbox(self):
-        return self._bbox
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def focal_from_fov(frame_w: int, fov_h_deg: float) -> float:
-    fov = max(10.0, min(170.0, float(fov_h_deg)))
-    return (frame_w * 0.5) / math.tan(math.radians(fov) * 0.5)
+        self._misses += 1
+        if self._misses > 25:
+            return False, None
+        return True, self._bbox
 
 
 def focal_from_sample(pixel_size: float, known_distance_m: float, known_width_m: float) -> float:
-    return (max(1.0, pixel_size) * known_distance_m) / max(0.01, known_width_m)
+    return (max(1.0, pixel_size) * known_distance_m) / max(0.005, known_width_m)
 
 
 def bbox_size_px(bbox: tuple[float, float, float, float], axis: str) -> float:
@@ -178,6 +190,8 @@ def bbox_size_px(bbox: tuple[float, float, float, float], axis: str) -> float:
         return max(1.0, h)
     if axis == "max":
         return max(1.0, w, h)
+    if axis == "diag":
+        return max(1.0, math.hypot(w, h))
     return max(1.0, w)
 
 
@@ -186,7 +200,6 @@ def load_calib(cfg: SystemConfig) -> dict:
         return {}
     try:
         data = json.loads(CALIB_PATH.read_text(encoding="utf-8"))
-        # Ignore absurd saved widths (e.g. user entered meters as 3.0 by mistake)
         w = float(data.get("known_object_width_m", cfg.distance.known_object_width_m))
         if 0.01 <= w <= 2.5:
             cfg.distance.known_object_width_m = w
@@ -194,9 +207,8 @@ def load_calib(cfg: SystemConfig) -> dict:
             cfg.distance.focal_length_px = float(data["focal_length_px"])
         if "desired_distance_m" in data:
             cfg.distance.desired_distance_m = float(data["desired_distance_m"])
-        if "fov_h_deg" in data:
-            cfg.camera.fov_h_deg = float(data["fov_h_deg"])
         print(f" Loaded calibration from {CALIB_PATH.name}")
+        print(f"   focal={cfg.distance.focal_length_px:.1f}px  object={cfg.distance.known_object_width_m*100:.1f}cm")
         return data
     except Exception as exc:
         print(f" Could not load calib: {exc}")
@@ -270,90 +282,77 @@ def open_camera(index: int) -> cv2.VideoCapture | None:
     return None
 
 
-def draw_hud(frame, *, locked, bbox, size_px, dist_m, dist_status, pitch_off, rc, fps, cfg, axis, calibrated):
+def draw_hud(frame, *, locked, size_px, dist_m, raw_dist, fps, cfg, axis, calibrated, scale):
     h, w = frame.shape[:2]
     cv2.drawMarker(frame, (w // 2, h // 2), (80, 80, 80), cv2.MARKER_CROSS, 22, 1)
-
-    panel = np.zeros((180, w, 3), dtype=np.uint8)
+    panel = np.zeros((170, w, 3), dtype=np.uint8)
     panel[:] = (18, 18, 18)
     known_cm = cfg.distance.known_object_width_m * 100.0
-    cal = "OK calibrated" if calibrated else "NOT calibrated - press C"
+    cal = "CALIBRATED" if calibrated else "NOT CALIBRATED — press C"
 
     lines = [
-        f"LIVE LOCK + DISTANCE   FPS {fps:.0f}   {cal}",
-        "Drag TIGHT box on object | C=calibrate | R=unlock | A=axis | S=save | Q=quit",
-        f"Object size setting: {known_cm:.1f} cm    Focal: {cfg.distance.focal_length_px:.0f} px    Axis: {axis}",
-        "C asks: (1) how far is the object in METERS   (2) how WIDE is it in CENTIMETERS",
+        f"ACCURATE DISTANCE LOCK   FPS {fps:.0f}   {cal}",
+        "Drag TIGHT box | C=calibrate | R=unlock | A=axis | S=save | Q=quit",
+        f"Object={known_cm:.1f}cm  Focal={cfg.distance.focal_length_px:.1f}px  Axis={axis}  Scale={scale:.2f}",
+        "Dist(m) = (object_m * focal_px) / box_px     box must grow when you move closer",
     ]
-    if locked and bbox is not None and dist_m is not None:
-        roll, pitch, yaw, thr = rc
+    if locked and dist_m is not None:
         lines += [
-            f"LOCKED  box={size_px:.0f}px   DIST={dist_m:.2f} m ({dist_m*100:.0f} cm)  [{dist_status}]  pitch={pitch_off:+.0f}",
-            f"RC  R{roll} P{pitch} Y{yaw} T{thr}",
+            f"box={size_px:.1f}px   DIST={dist_m:.2f} m ({dist_m*100:.0f} cm)   raw={raw_dist:.2f} m",
         ]
     else:
-        lines += ["NO LOCK - drag a box around the target", ""]
+        lines += ["NO LOCK — draw a tight box on the object edges"]
 
     for i, text in enumerate(lines):
         color = (200, 200, 200)
         if i == 0:
-            color = (80, 180, 255) if calibrated else (40, 40, 255)
+            color = (80, 200, 120) if calibrated else (40, 40, 255)
         if locked and i == 4:
-            color = (0, 230, 140)
-        cv2.putText(panel, text, (10, 24 + i * 26), cv2.FONT_HERSHEY_SIMPLEX, 0.52, color, 1, cv2.LINE_AA)
+            color = (0, 255, 160)
+        cv2.putText(panel, text, (10, 26 + i * 28), cv2.FONT_HERSHEY_SIMPLEX, 0.52, color, 1, cv2.LINE_AA)
     return np.vstack([frame, panel])
 
 
-def run_calibration(cfg, estimator, controller, bbox, axis) -> bool:
-    """Ask two clear questions. Returns True if calibrated."""
+def run_calibration(cfg, estimator, size_px: float, axis: str) -> bool:
     print()
-    print("=" * 60)
-    print(" CALIBRATION — answer these 2 questions")
-    print("=" * 60)
-    print(" Q1 DISTANCE = how far the object is from the camera.")
-    print("    Use a tape measure. Example: stand 1 meter away -> type 1")
-    print("    Example: 1.5 meters away -> type 1.5")
-    print()
-    print(" Q2 OBJECT WIDTH = how wide the thing inside your box is,")
-    print("    in CENTIMETERS (not meters!).")
-    print("    Examples: phone ~7   water bottle ~7   laptop ~30   person shoulders ~45")
-    print("=" * 60)
-
+    print("=" * 64)
+    print(" CALIBRATION")
+    print("  Q1 = tape-measure distance camera → object, in METERS")
+    print("  Q2 = real size of what is INSIDE the green box, in CENTIMETERS")
+    print("       (phone width ~7, bottle ~6-8, book ~15, laptop ~30)")
+    print("  Tip: box must be TIGHT on the object. Loose box = wrong distance.")
+    print("=" * 64)
     try:
-        dist_m = ask_float("Q1) Distance to object in METERS", 1.0)
-        width_cm = ask_float("Q2) Object width in CENTIMETERS", 30.0)
+        dist_m = ask_float("Q1) Distance in METERS", 1.0)
+        width_cm = ask_float("Q2) Object size in CENTIMETERS", max(1.0, cfg.distance.known_object_width_m * 100))
     except Exception as exc:
         print(f" Cancelled: {exc}")
         return False
 
-    if not (0.15 <= dist_m <= 40.0):
-        print(f" Distance {dist_m} m looks wrong. Use something like 0.5 to 10.")
+    if not (0.05 <= dist_m <= 30.0):
+        print(f" Distance {dist_m} m invalid (use 0.05–30).")
         return False
-    if not (1.0 <= width_cm <= 250.0):
-        print(f" Width {width_cm} cm looks wrong. Use centimeters (phone=7, not 0.07).")
+    if not (2.0 <= width_cm <= 200.0):
+        print(f" Width {width_cm} cm invalid. Use centimeters (phone=7, not 0.07).")
         return False
 
     width_m = width_cm / 100.0
-    size_px = bbox_size_px(bbox, axis)
     new_f = focal_from_sample(size_px, dist_m, width_m)
-
     cfg.distance.focal_length_px = new_f
     cfg.distance.known_object_width_m = width_m
     estimator.update_config(cfg.distance)
-    controller.distance_estimator.update_config(cfg.distance)
-
     check = estimator.estimate_distance(size_px)
+
     print()
-    print(f" Box size on screen : {size_px:.0f} pixels")
-    print(f" You said distance  : {dist_m:.2f} m")
-    print(f" You said width     : {width_cm:.1f} cm ({width_m:.3f} m)")
-    print(f" Computed focal     : {new_f:.1f} px")
-    print(f" Check (should ~{dist_m:.2f} m): {check:.2f} m")
-    if abs(check - dist_m) < 0.05:
-        print(" Calibration looks GOOD.")
+    print(f" Averaged box size : {size_px:.1f} px   axis={axis}")
+    print(f" You entered       : {dist_m:.3f} m away, object {width_cm:.1f} cm")
+    print(f" New focal length  : {new_f:.2f} px")
+    print(f" Verify distance   : {check:.3f} m  (must match {dist_m:.3f})")
+    if abs(check - dist_m) < 0.02:
+        print(" Calibration OK — now move closer/farther; distance should change.")
     else:
-        print(" Warning: check mismatch — redraw a tighter box and try C again.")
-    print("=" * 60)
+        print(" Verify mismatch — try again with a tighter box.")
+    print("=" * 64)
     print()
     return True
 
@@ -361,65 +360,55 @@ def run_calibration(cfg, estimator, controller, bbox, axis) -> bool:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--camera", type=int, default=0)
-    parser.add_argument("--width-cm", type=float, default=None, help="Object width in centimeters")
-    parser.add_argument("--fov", type=float, default=None)
-    parser.add_argument("--axis", choices=("width", "height", "max"), default="width")
+    parser.add_argument("--width-cm", type=float, default=None)
+    parser.add_argument("--axis", choices=("width", "height", "max", "diag"), default="width")
     args = parser.parse_args()
 
     cfg = SystemConfig()
-    # Sensible default object size (30 cm) — never leave absurd values
     if cfg.distance.known_object_width_m > 2.5 or cfg.distance.known_object_width_m < 0.01:
         cfg.distance.known_object_width_m = 0.30
 
     meta = load_calib(cfg)
     axis = meta.get("size_axis", args.axis)
+    if axis not in ("width", "height", "max", "diag"):
+        axis = "width"
     calibrated = "focal_length_px" in meta and 0.01 <= cfg.distance.known_object_width_m <= 2.5
 
     if args.width_cm is not None:
         cfg.distance.known_object_width_m = args.width_cm / 100.0
-    if args.fov is not None:
-        cfg.camera.fov_h_deg = args.fov
 
     cfg.prediction.enable_kalman = False
-    cfg.offsets.deadzone_norm = 0.01
 
     cap = open_camera(args.camera)
     if cap is None:
         print(f"ERROR: cannot open camera {args.camera}")
         return 1
 
-    ok, sample = cap.read()
-    frame_w = int(sample.shape[1]) if ok else 1280
     if not calibrated:
-        cfg.distance.focal_length_px = focal_from_fov(frame_w, cfg.camera.fov_h_deg)
-        print(f" Temporary FOV focal={cfg.distance.focal_length_px:.0f}px — press C to calibrate properly.")
+        ok, sample = cap.read()
+        fw = int(sample.shape[1]) if ok else 1280
+        cfg.distance.focal_length_px = (fw * 0.5) / math.tan(math.radians(max(10.0, cfg.camera.fov_h_deg) * 0.5))
+        print(f" No calib yet — FOV estimate focal={cfg.distance.focal_length_px:.0f}px. Press C after lock.")
 
-    win = "Arjuna Live Distance Lock"
+    win = "Arjuna Accurate Distance Lock"
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(win, 1100, 820)
-
     drag = RoiDrag()
     cv2.setMouseCallback(win, drag.on_mouse)
 
     controller = FPVFollowController(cfg)
     estimator = DistanceEstimator(cfg.distance)
-    lock = PixelLockTracker()
+    lock = ScaleAwareLock()
     locked = False
     bbox = None
 
-    print("=" * 60)
-    print(" HOW DISTANCE WORKS")
-    print("   Dist(m) = (object_width_m * focal_px) / box_width_px")
-    print()
-    print(" WHAT THOSE TWO QUESTIONS MEAN (press C):")
-    print("   Q1 Distance (meters)  = tape-measure distance camera -> object")
-    print("                           You typed 1  => object is 1 meter away")
-    print("   Q2 Width (centimeters)= real size of the object in the box")
-    print("                           Phone ~7 cm, bottle ~7 cm, person ~45 cm")
-    print("                           If you type 1 here it means 1 cm (tiny!)")
-    print("                           Earlier [3.0] was wrongly in METERS — that")
-    print("                           made the math nonsense. Now Q2 is in CM.")
-    print("=" * 60)
+    size_hist: deque[float] = deque(maxlen=9)
+    dist_hist: deque[float] = deque(maxlen=7)
+
+    print("=" * 64)
+    print(" For accuracy: tight box + correct CM width + multi-scale lock")
+    print(" After C: walk closer → distance must DROP; walk away → must RISE")
+    print("=" * 64)
 
     t0 = time.perf_counter()
     n = 0
@@ -441,50 +430,52 @@ def main() -> int:
             if lock.init(frame, (rx, ry, rw, rh)):
                 bbox = (float(rx), float(ry), float(rw), float(rh))
                 locked = True
+                size_hist.clear()
+                dist_hist.clear()
                 controller.reset()
-                print(f" LOCKED {rw}x{rh}px — keep object similar; press C to calibrate")
+                print(f" LOCKED {rw}x{rh}px — press C to calibrate at a known distance")
             else:
                 locked = False
                 bbox = None
 
         size_px = 0.0
+        scale = lock._scale if locked else 1.0
         if locked:
             ok_tr, box = lock.update(frame)
             if ok_tr and box is not None:
                 bbox = box
                 x, y, bw, bh = bbox
-                size_px = bbox_size_px(bbox, axis)
+                raw_size = bbox_size_px(bbox, axis)
+                size_hist.append(raw_size)
+                size_px = float(np.median(size_hist))
                 cv2.rectangle(frame, (int(x), int(y)), (int(x + bw), int(y + bh)), (0, 220, 80), 2)
                 cx, cy = int(x + bw / 2), int(y + bh / 2)
                 cv2.circle(frame, (cx, cy), 4, (0, 220, 80), -1)
                 cv2.line(frame, (fw // 2, fh // 2), (cx, cy), (0, 160, 255), 1)
             else:
-                print(" LOCK LOST — draw the box again")
+                print(" LOCK LOST")
                 locked = False
                 bbox = None
+                size_hist.clear()
+                dist_hist.clear()
 
         drag.draw(frame)
 
         dist_m = None
-        dist_status = "-"
-        pitch_off = 0.0
-        rc = (1500, 1500, 1500, 1500)
+        raw_dist = None
         estimator.update_config(cfg.distance)
         controller.distance_estimator.update_config(cfg.distance)
 
-        if locked and bbox is not None:
-            size_px = bbox_size_px(bbox, axis)
+        if locked and bbox is not None and size_px > 1:
             x, y, bw, bh = bbox
-            synth = (x, y, size_px, bh)
-            roll, pitch, yaw, thr = controller.update(synth, fw, fh, base_throttle=1500)
-            rc = (roll, pitch, yaw, thr)
-            dist_m = estimator.estimate_distance(size_px)
-            full = estimator.compute_following_control(size_px, dt=0.033)
-            dist_status = full.status
-            pitch_off = full.recommended_pitch_offset
+            synth = (x, y, size_px if axis == "width" else bw, bh)
+            controller.update(synth, fw, fh, base_throttle=1500)
+            raw_dist = estimator.estimate_distance(size_px)
+            dist_hist.append(raw_dist)
+            dist_m = float(np.median(dist_hist))
             cv2.putText(
                 frame, f"{dist_m:.2f} m", (int(x), max(22, int(y) - 8)),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 180), 2, cv2.LINE_AA,
+                cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 180), 2, cv2.LINE_AA,
             )
         else:
             controller.update(None, fw, fh, base_throttle=1500)
@@ -497,9 +488,8 @@ def main() -> int:
             t0 = now
 
         display = draw_hud(
-            frame, locked=locked, bbox=bbox, size_px=size_px, dist_m=dist_m,
-            dist_status=dist_status, pitch_off=pitch_off, rc=rc, fps=fps,
-            cfg=cfg, axis=axis, calibrated=calibrated,
+            frame, locked=locked, size_px=size_px, dist_m=dist_m, raw_dist=raw_dist or 0.0,
+            fps=fps, cfg=cfg, axis=axis, calibrated=calibrated, scale=scale,
         )
         cv2.imshow(win, display)
         key = cv2.waitKey(1) & 0xFF
@@ -509,24 +499,33 @@ def main() -> int:
         if key == 27:
             if locked:
                 locked, bbox = False, None
+                size_hist.clear()
+                dist_hist.clear()
             else:
                 break
         if key in (ord("r"), ord("R")):
             locked, bbox = False, None
+            size_hist.clear()
+            dist_hist.clear()
             print(" UNLOCKED")
         if key in (ord("a"), ord("A")):
-            axis = {"width": "height", "height": "max", "max": "width"}[axis]
-            print(f" Axis -> {axis}")
+            order = ["width", "height", "max", "diag"]
+            axis = order[(order.index(axis) + 1) % len(order)]
+            size_hist.clear()
+            dist_hist.clear()
+            print(f" Axis -> {axis}  (re-calibrate with C after changing axis)")
         if key in (ord("s"), ord("S")):
             save_calib(cfg, axis)
             calibrated = True
         if key in (ord("c"), ord("C")):
-            if not locked or bbox is None:
-                print(" Lock an object first (drag a box), then press C")
+            if not locked or not size_hist:
+                print(" Lock first, wait ~0.5s for stable box, then press C")
             else:
-                if run_calibration(cfg, estimator, controller, bbox, axis):
+                avg_size = float(np.median(size_hist))
+                if run_calibration(cfg, estimator, avg_size, axis):
                     calibrated = True
                     save_calib(cfg, axis)
+                    dist_hist.clear()
 
         if ord("0") <= key <= ord("9"):
             new_idx = key - ord("0")
@@ -537,6 +536,8 @@ def main() -> int:
                     cap = new_cap
                     cam_idx = new_idx
                     locked, bbox = False, None
+                    size_hist.clear()
+                    dist_hist.clear()
                     print(f" Camera {cam_idx}")
 
     cap.release()
