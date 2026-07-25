@@ -29,6 +29,7 @@ class VideoDisplayWidget(QLabel):
         self.start_point = QPoint()
         self.end_point = QPoint()
         self.current_frame: np.ndarray | None = None
+        self._rgb_keep: np.ndarray | None = None  # keep buffer alive for QImage
 
     def _content_rect(self) -> QRect:
         """Letterboxed image rect inside the widget (KeepAspectRatio)."""
@@ -100,23 +101,35 @@ class VideoDisplayWidget(QLabel):
     def update_frame(self, frame_bgr: np.ndarray) -> None:
         if frame_bgr is None or getattr(frame_bgr, "size", 0) == 0:
             return
-        # Own a contiguous copy — QImage does not own the numpy buffer.
         frame_bgr = np.ascontiguousarray(frame_bgr)
         self.current_frame = frame_bgr
         h, w = frame_bgr.shape[:2]
         if h < 2 or w < 2:
             return
-        frame_rgb = np.ascontiguousarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
-        bytes_per_line = int(frame_rgb.strides[0])
+
+        # Downscale large frames for UI (keeps tracking at full res on worker)
+        max_disp_w = max(640, self.width() * 2)
+        if w > max_disp_w:
+            scale = max_disp_w / float(w)
+            frame_bgr = cv2.resize(
+                frame_bgr,
+                (int(w * scale), int(h * scale)),
+                interpolation=cv2.INTER_AREA,
+            )
+            h, w = frame_bgr.shape[:2]
+
+        self._rgb_keep = np.ascontiguousarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
+        bytes_per_line = int(self._rgb_keep.strides[0])
         qimg = QImage(
-            frame_rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888
-        ).copy()
+            self._rgb_keep.data, w, h, bytes_per_line, QImage.Format.Format_RGB888
+        )
+        # Fast scale — SmoothTransformation was a major UI hitch
         pix = QPixmap.fromImage(qimg)
         self.setPixmap(
             pix.scaled(
                 self.size(),
                 Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
+                Qt.TransformationMode.FastTransformation,
             )
         )
 

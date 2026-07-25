@@ -155,11 +155,28 @@ class MSPController(FlightController):
         except Exception as e:
             self.logger.error(f"Failed to send control command: {e}")
 
+    def get_attitude(self) -> dict[str, float]:
+        """Single cheap MSP_ATTITUDE round-trip — used for camera levelling."""
+        if not self.is_connected():
+            return {}
+        try:
+            self.ser.write(msp_link.build_msp_request(msp_link.MSP_ATTITUDE))
+            resp = msp_link.read_msp_response(self.ser)
+            if resp and resp[0] == msp_link.MSP_ATTITUDE:
+                return msp_link.parse_msp_attitude(resp[1]) or {}
+        except Exception as e:
+            self.logger.error(f"Error reading attitude: {e}")
+        return {}
+
     def get_telemetry(self) -> dict[str, Any]:
         telemetry: dict[str, Any] = {}
         if not self.is_connected():
             return telemetry
         try:
+            att = self.get_attitude()
+            if att:
+                telemetry.update(att)
+
             self.ser.write(msp_link.build_msp_request(msp_link.MSP_STATUS_EX))
             resp = msp_link.read_msp_response(self.ser)
             if resp and resp[0] == msp_link.MSP_STATUS_EX:

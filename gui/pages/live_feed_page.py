@@ -136,7 +136,10 @@ class LiveFeedPage(QWidget):
         msp_grid.setColumnStretch(2, 1)
         left_l.addWidget(msp_bar)
 
-        self._refresh_camera_devices()
+        # Do not synchronously open every Windows capture device while the main
+        # window is being constructed. Some drivers block for many seconds and
+        # make Qt appear "Not responding". The Refresh button performs a probe.
+        self._refresh_camera_devices(probe=False)
         self._refresh_serial_ports()
 
         # Video
@@ -315,10 +318,15 @@ class LiveFeedPage(QWidget):
         )
         return lbl
 
-    def _refresh_camera_devices(self) -> None:
+    def _refresh_camera_devices(self, _checked: bool = False, probe: bool = True) -> None:
         self.combo_cameras.blockSignals(True)
         self.combo_cameras.clear()
-        for idx, label in list_camera_devices():
+        if probe:
+            devices = list_camera_devices()
+        else:
+            idx = int(self.sys_config.camera.camera_index)
+            devices = [(idx, f"Configured Camera {idx}")]
+        for idx, label in devices:
             short = label.replace(" (Capture Card / Video Input)", "")
             if len(short) > 42:
                 short = short[:39] + "…"
@@ -405,7 +413,10 @@ class LiveFeedPage(QWidget):
         self.btn_assist.setText("Following" if checked else "Follow")
 
     def _on_toggle_arm(self, checked: bool) -> None:
-        self.worker.arm_requested = checked
+        if checked:
+            self.worker.arm_drone()
+        else:
+            self.worker.disarm_drone()
         self.btn_arm.setText("DISARM" if checked else "ARM")
 
     def _on_manual_override(self) -> None:
@@ -424,25 +435,39 @@ class LiveFeedPage(QWidget):
     @pyqtSlot(object, object)
     def _on_frame_processed(self, frame_bgr, rec) -> None:
         self.video_widget.update_frame(frame_bgr)
-        self.telemetry_plots.update_telemetry(rec)
-        self.img_proc_widget.update_processing_views(
-            frame_bgr,
-            pixel_engine=self.worker.hybrid.pixel_engine,
-            target_hist=self.worker.hybrid._target_hist,
-            bbox=(int(rec.bbox_x), int(rec.bbox_y), int(rec.bbox_w), int(rec.bbox_h)) if rec.locked else None,
-        )
+        # Heavy secondary views — update less often to keep UI responsive
+        if int(getattr(rec, "frame_idx", 0)) % 3 == 0:
+            self.telemetry_plots.update_telemetry(rec)
+        if int(getattr(rec, "frame_idx", 0)) % 5 == 0:
+            self.img_proc_widget.update_processing_views(
+                frame_bgr,
+                pixel_engine=self.worker.hybrid.pixel_engine,
+                target_hist=self.worker.hybrid._target_hist,
+                bbox=(int(rec.bbox_x), int(rec.bbox_y), int(rec.bbox_w), int(rec.bbox_h)) if rec.locked else None,
+            )
         if rec.locked:
             self.lbl_lock.setText(f"LOCK  ACTIVE · {rec.source.upper()}")
             self.lbl_lock.setStyleSheet(
                 "color: #3d8f6a; font-family: Consolas, monospace; font-size: 8pt; background: transparent;"
             )
             self.pill_feed.set_status("TRACKING", "ok")
+            # Lock path enables assist in the worker — keep the Follow button in sync
+            if self.worker.assist_enabled and not self.btn_assist.isChecked():
+                self.btn_assist.blockSignals(True)
+                self.btn_assist.setChecked(True)
+                self.btn_assist.setText("Following")
+                self.btn_assist.blockSignals(False)
         else:
             self.lbl_lock.setText("LOCK  NONE")
             self.lbl_lock.setStyleSheet(
                 "color: #9aa3b2; font-family: Consolas, monospace; font-size: 8pt; background: transparent;"
             )
             self.pill_feed.set_status("LIVE", "info")
+
+        # Show why AI is / isn't driving sticks
+        status = getattr(self.worker, "follow_status", "")
+        if status:
+            self.lbl_lock.setToolTip(status)
 
         self.lbl_dist.setText(f"DIST  {rec.estimated_distance_m:.1f} m")
         self.bar_conf.setValue(int(rec.confidence * 100))

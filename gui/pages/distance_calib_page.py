@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections import deque
 from statistics import median
 
@@ -38,6 +39,7 @@ from estimation.distance_calib import (
 from gui.style import PALETTE
 from gui.widgets.metric_card import MetricCard
 from gui.widgets.page_header import PageHeader, StatusPill
+from vision.camera_geometry import solve_bearing
 
 
 def _dspin(value: float, lo: float, hi: float, step: float, decimals: int = 2) -> QDoubleSpinBox:
@@ -94,7 +96,7 @@ class DistanceCalibPage(QWidget):
         # ---- KPI row ----
         kpi_row = QHBoxLayout()
         kpi_row.setSpacing(8)
-        self.kpi_dist = MetricCard("Distance", "-- m", "from lock box", PALETTE["ok"])
+        self.kpi_dist = MetricCard("Distance", "-- m", "line of sight", PALETTE["ok"])
         self.kpi_size = MetricCard("Box size", "-- px", "measured axis", PALETTE["accent"])
         self.kpi_w = MetricCard("Width", "-- px", "bbox W", PALETTE["info"])
         self.kpi_h = MetricCard("Height", "-- px", "bbox H", "#c9a227")
@@ -293,6 +295,20 @@ class DistanceCalibPage(QWidget):
         mad = sum(abs(s - med) for s in self._size_history) / len(self._size_history)
         return 100.0 * mad / med
 
+    def _dist_caption(self, frame, bx: float, by: float, bw: float, bh: float, dist_m: float) -> str:
+        """Caption for the distance card — adds the horizontal range when the camera is tilted."""
+        cam = self.sys_config.camera
+        tilted = abs(cam.mount_pitch_deg) > 0.5 or abs(cam.mount_yaw_deg) > 0.5
+        if not tilted or frame is None or getattr(frame, "ndim", 0) < 2:
+            return f"{dist_m * 100:.0f} cm · line of sight"
+        fh, fw = frame.shape[0], frame.shape[1]
+        b = solve_bearing(
+            bx + bw * 0.5, by + bh * 0.5, fw, fh, cam, self.sys_config.offsets,
+            slant_m=dist_m,
+            calibrated_focal_px=self.sys_config.distance.focal_length_px,
+        )
+        return f"LOS · horiz {b.ground_m:.2f} m @ {math.degrees(b.el_rad):+.0f}°"
+
     def _update_focal_kpi(self) -> None:
         f = self.sys_config.distance.focal_length_px
         cal = "calibrated" if is_calibrated(self.sys_config) else "default / FOV"
@@ -378,7 +394,10 @@ class DistanceCalibPage(QWidget):
         self.lbl_result.setText("Parameters applied to Live Feed.")
 
     @pyqtSlot(object, object)
-    def _on_live_telemetry(self, _frame, rec) -> None:
+    def _on_live_telemetry(self, frame, rec) -> None:
+        # Skip some UI refreshes so the main feed stays smooth
+        if int(getattr(rec, "frame_idx", 0)) % 2 != 0:
+            return
         try:
             locked = bool(getattr(rec, "locked", False))
             self._locked = locked
@@ -430,7 +449,9 @@ class DistanceCalibPage(QWidget):
                 f"(raw {size_px:.1f} · n={len(self._size_history)})"
             )
 
-            self.kpi_dist.set_value(f"{dist_m:.2f} m", f"{dist_m * 100:.0f} cm")
+            # The pinhole gives a line-of-sight range. With a tilted mount the
+            # follow controller regulates the horizontal part, so show both.
+            self.kpi_dist.set_value(f"{dist_m:.2f} m", self._dist_caption(frame, bx, by, bw, bh, dist_m))
             self.kpi_size.set_value(f"{stable:.0f} px", f"axis={axis}")
             self.kpi_w.set_value(f"{bw:.0f} px", "bbox width")
             self.kpi_h.set_value(f"{bh:.0f} px", "bbox height")

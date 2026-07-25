@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 
 import cv2
@@ -21,6 +22,7 @@ from estimation.distance_calib import bbox_size_px
 from sys_logging.system_logger import LogCategory, LogSeverity, SystemLogger
 from safety.failsafe_manager import FailsafeManager
 from telemetry.telemetry_logger import TelemetryLogger, TelemetryRecord
+from vision.camera_geometry import level_reference_line
 
 
 def list_camera_devices(max_test: int = 6) -> list[tuple[int, str]]:
@@ -56,6 +58,7 @@ class TrackingWorkerThread(QThread):
         self.running = False
         self.assist_enabled = False
         self.arm_requested = False
+        self.gui_arm_requested = False
         self.mode_requested = False
 
         self.fc = MAVLinkController()
@@ -82,6 +85,7 @@ class TrackingWorkerThread(QThread):
         self._fps_window: list[float] = []
         self.throttle_value: int = 1000
         self.flight_mode: str = "ANGLE"
+        self.follow_status: str = "IDLE"  # Why sticks are / aren't AI-driven (HUD)
 
     def adjust_throttle(self, delta: int) -> int:
         self.throttle_value = max(1000, min(2000, self.throttle_value + delta))
@@ -114,11 +118,13 @@ class TrackingWorkerThread(QThread):
         return self.flight_mode
 
     def arm_drone(self) -> bool:
+        self.gui_arm_requested = True
         self.arm_requested = True
-        self.sys_log.log(LogCategory.DRONE, "ARM requested", module="Manual Control")
+        self.sys_log.log(LogCategory.DRONE, "ARM requested (GUI)", module="Manual Control")
         return True
 
     def disarm_drone(self) -> bool:
+        self.gui_arm_requested = False
         self.arm_requested = False
         self.throttle_value = 1000  # Reset throttle to safety min on disarm
         self.sys_log.log(LogCategory.DRONE, "DISARM requested (Throttle reset to 1000)", module="Manual Control")
@@ -170,8 +176,18 @@ class TrackingWorkerThread(QThread):
 
         # Attempt 2: Try MAVLinkController (for ArduPilot / PX4 / MAVLink)
         try:
+            aux = self.sys_config.aux_channels
             mav = MAVLinkController(connection_string=port_name, baudrate=baud_rate)
             if mav.connect():
+                if hasattr(mav, "update_aux_config"):
+                    mav.update_aux_config(
+                        arm_channel=aux.arm_channel,
+                        mode_channel=aux.mode_channel,
+                        arm_high=aux.arm_high,
+                        arm_low=aux.arm_low,
+                        mode_high=aux.mode_high,
+                        mode_low=aux.mode_low,
+                    )
                 self.fc = mav
                 self.is_connected = True
                 self.port_name = port_name
@@ -266,6 +282,13 @@ class TrackingWorkerThread(QThread):
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.sys_config.camera.frame_width)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.sys_config.camera.frame_height)
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                try:
+                    cap.set(
+                        cv2.CAP_PROP_FPS,
+                        max(15.0, min(120.0, float(self.sys_config.camera.target_fps or 60.0))),
+                    )
+                except Exception:
+                    pass
                 
                 # Check if we can read with MJPG
                 ok, frame = cap.read()
@@ -298,6 +321,8 @@ class TrackingWorkerThread(QThread):
         last_time = time.time()
         last_msp_send = 0.0
         msp_interval = 1.0 / 50.0
+        last_att_poll = 0.0
+        att_interval = 1.0 / 10.0
         failed_reads = 0
 
         while self.running:
@@ -388,7 +413,8 @@ class TrackingWorkerThread(QThread):
                 if locked and target is not None:
                     vx, vy = self.controller.motion_predictor.kalman.get_velocity()
                     color_hist = None
-                    if self.hybrid._target_hist is not None:
+                    # Hist flatten is expensive — only every few frames
+                    if self.frame_count % 10 == 0 and self.hybrid._target_hist is not None:
                         color_hist = self.hybrid._target_hist.flatten().tolist()[:64]
                     dist_m = 0.0
                     if self.controller.last_distance:
@@ -402,7 +428,8 @@ class TrackingWorkerThread(QThread):
                         distance_m=dist_m,
                         color_hist=color_hist,
                     )
-                    self.target_store.update_active(target, frame, bbox_xywh=bbox)
+                    if self.frame_count % 3 == 0:
+                        self.target_store.update_active(target, frame, bbox_xywh=bbox)
                     if self.assist_enabled and not self._was_locked:
                         target.add_event(
                             "Drone Following",
@@ -424,17 +451,51 @@ class TrackingWorkerThread(QThread):
 
                 self._was_locked = locked
 
+                # Camera levelling needs live attitude — poll slowly and only when asked,
+                # since an MSP round-trip on the control loop is expensive.
+                if (
+                    self.sys_config.camera.stabilize_with_attitude
+                    and self.is_connected
+                    and now - last_att_poll >= att_interval
+                    and hasattr(self, "fc")
+                    and hasattr(self.fc, "get_attitude")
+                ):
+                    last_att_poll = now
+                    try:
+                        att = self.fc.get_attitude() or {}
+                        if att:
+                            self.controller.set_vehicle_attitude(
+                                float(att.get("roll_deg", 0.0)),
+                                float(att.get("pitch_deg", 0.0)),
+                            )
+                    except Exception:
+                        pass
+
                 dist_m = 0.0
                 if self.controller.last_distance:
                     dist_m = self.controller.last_distance.distance_m
 
-                safety_state = self.failsafe.evaluate(locked, conf, dist_m if locked else None)
+                safety_state = self.failsafe.evaluate(
+                    locked,
+                    conf,
+                    dist_m if locked else None,
+                    min_safe_distance_m=self.sys_config.distance.min_safe_distance_m,
+                )
 
                 roll, pitch, yaw, throttle = 1500, 1500, 1500, self.throttle_value
                 channel_overrides: dict[int, int] = {}
+                joy_wants_arm = False
+                joy_connected = False
+                js_roll = js_pitch = js_yaw = js_thr = None
+
+                # Always poll joystick in the control loop (Joystick page is not required)
+                if self.sys_config.joystick.enabled and self.joystick_mgr is not None:
+                    self.joystick_mgr.poll()
+
                 if self.sys_config.joystick.enabled and self.joystick_mgr and self.joystick_mgr.state.connected:
+                    joy_connected = True
                     js = self.joystick_mgr.state
-                    roll, pitch, yaw, throttle = js.roll_pwm, js.pitch_pwm, js.yaw_pwm, js.throttle_pwm
+                    js_roll, js_pitch, js_yaw, js_thr = js.roll_pwm, js.pitch_pwm, js.yaw_pwm, js.throttle_pwm
 
                     used_rc: set[int] = set()
                     for i, aux_cfg in enumerate(self.sys_config.joystick.aux_channels):
@@ -448,40 +509,130 @@ class TrackingWorkerThread(QThread):
                         )
                         channel_overrides[rc] = int(pwm)
 
-                    arm_ch = self.sys_config.aux_channels.arm_channel
-                    arm_pwm = channel_overrides.get(
-                        arm_ch,
-                        js.aux_pwm.get("Arm", self.sys_config.aux_channels.arm_low),
-                    )
-                    if arm_pwm >= self.sys_config.aux_channels.arm_high - 50:
-                        self.arm_requested = True
-                    elif arm_pwm <= self.sys_config.aux_channels.arm_low + 50:
-                        self.arm_requested = False
-                elif locked and self.assist_enabled and not safety_state.override_active:
+                    # Resolve Arm switch PWM from FC arm channel or named "Arm" AUX
+                    arm_ch = int(self.sys_config.aux_channels.arm_channel)
+                    arm_pwm = channel_overrides.get(arm_ch)
+                    if arm_pwm is None:
+                        arm_pwm = js.aux_pwm.get("Arm")
+                    if arm_pwm is None:
+                        # Fall back: any AUX whose name contains "arm"
+                        for i, aux_cfg in enumerate(self.sys_config.joystick.aux_channels):
+                            if "arm" in (aux_cfg.name or "").lower():
+                                arm_pwm = js.aux_pwm.get(f"#{i}")
+                                if arm_pwm is not None and int(aux_cfg.rc_channel) >= 0:
+                                    channel_overrides[int(aux_cfg.rc_channel)] = int(arm_pwm)
+                                break
+                    if arm_pwm is None:
+                        arm_pwm = self.sys_config.aux_channels.arm_low
+
+                    joy_wants_arm = int(arm_pwm) >= int(self.sys_config.aux_channels.arm_high) - 50
+
+                    # Ensure FC arm channel carries the Arm switch value when mapped
+                    if arm_ch not in channel_overrides and arm_pwm is not None:
+                        channel_overrides[arm_ch] = int(arm_pwm)
+
+                    # Remote OR GUI can arm; both must be off to disarm
+                    self.arm_requested = bool(self.gui_arm_requested or joy_wants_arm)
+
+                    # Mode switch → flight mode
+                    mode_ch = int(self.sys_config.aux_channels.mode_channel)
+                    mode_pwm = channel_overrides.get(mode_ch, js.aux_pwm.get("Flight Mode"))
+                    if mode_pwm is not None:
+                        if int(mode_pwm) >= int(self.sys_config.aux_channels.mode_high) - 50:
+                            self.flight_mode = "ANGLE"
+                            if hasattr(self.fc, "set_flight_mode"):
+                                self.fc.set_flight_mode("ANGLE")
+                        elif int(mode_pwm) <= int(self.sys_config.aux_channels.mode_low) + 50:
+                            self.flight_mode = "ACRO"
+                            if hasattr(self.fc, "set_flight_mode"):
+                                self.fc.set_flight_mode("ACRO")
+                else:
+                    self.arm_requested = bool(self.gui_arm_requested)
+
+                follow_min = float(self.sys_config.safety.follow_min_confidence)
+                ai_follow = (
+                    locked
+                    and self.assist_enabled
+                    and conf >= follow_min
+                    and not safety_state.override_active
+                )
+
+                if ai_follow:
                     roll, pitch, yaw, throttle = self.controller.update(
                         bbox, w, h, base_throttle=self.throttle_value
                     )
+                    # Hold / reverse-only when inside the soft proximity band
+                    if not safety_state.allow_forward_motion:
+                        mid = 1500
+                        if self.controller.cfg.pitch_dir < 0:
+                            pitch = max(int(pitch), mid)
+                        else:
+                            pitch = min(int(pitch), mid)
+                    # Safety: large stick deflection from the remote overrides that axis
+                    if joy_connected and js_roll is not None:
+                        def _stick_or_ai(joy_v: int, ai_v: int, mid: int = 1500, dz: int = 70) -> int:
+                            return int(joy_v) if abs(int(joy_v) - mid) > dz else int(ai_v)
+
+                        roll = _stick_or_ai(js_roll, roll)
+                        pitch = _stick_or_ai(js_pitch, pitch)
+                        yaw = _stick_or_ai(js_yaw, yaw)
+                        # Throttle: prefer pilot stick when raised above the GUI base
+                        if abs(int(js_thr) - int(self.throttle_value)) > 80:
+                            throttle = int(js_thr)
+                    self.follow_status = f"FOLLOWING conf={conf * 100:.0f}%"
+                elif joy_connected and js_roll is not None:
+                    # Manual sticks from the remote; AUX/arm already applied above
+                    roll, pitch, yaw, throttle = int(js_roll), int(js_pitch), int(js_yaw), int(js_thr)
+                    self.controller.fade_to_mid(base_throttle=self.throttle_value)
+                    if not locked:
+                        self.follow_status = "MANUAL (no lock)"
+                    elif not self.assist_enabled:
+                        self.follow_status = "MANUAL (Follow OFF)"
+                    elif conf < follow_min:
+                        self.follow_status = f"MANUAL (conf {conf * 100:.0f}% < {follow_min * 100:.0f}%)"
+                    elif safety_state.override_active:
+                        self.follow_status = "MANUAL (override)"
+                    else:
+                        self.follow_status = "MANUAL"
                 else:
                     roll, pitch, yaw, throttle = self.controller.fade_to_mid(
                         base_throttle=self.throttle_value
                     )
+                    if not locked:
+                        self.follow_status = "IDLE (no lock)"
+                    elif not self.assist_enabled:
+                        self.follow_status = "IDLE (Follow OFF — press Follow)"
+                    elif conf < follow_min:
+                        self.follow_status = f"IDLE (conf {conf * 100:.0f}% < {follow_min * 100:.0f}%)"
+                    elif safety_state.override_active:
+                        self.follow_status = "IDLE (override)"
+                    else:
+                        self.follow_status = "IDLE"
 
                 if now - last_msp_send >= msp_interval:
                     last_msp_send = now
                     if self.is_connected and hasattr(self, "fc") and self.fc.is_connected():
                         if hasattr(self.fc, "set_channel_overrides"):
                             self.fc.set_channel_overrides(channel_overrides)
+                        if hasattr(self.fc, "set_flight_mode"):
+                            self.fc.set_flight_mode(self.flight_mode)
+                        # Keep _armed in sync with requested state; send_control carries ARM AUX
                         if self.arm_requested != getattr(self.fc, "_armed", False):
                             if self.arm_requested:
                                 self.fc.arm()
                             else:
                                 self.fc.disarm()
+                        else:
+                            # Still refresh _armed flag so send_control keeps AUX high/low
+                            self.fc._armed = bool(self.arm_requested)
 
                         self.fc.send_control(roll=roll, pitch=pitch, yaw=yaw, throttle=throttle)
                         if self.frame_count % 30 == 0:
                             self.sys_log.log(
                                 LogCategory.DRONE,
-                                f"Follow Control -> R:{roll} P:{pitch} Y:{yaw} T:{throttle} | ARM:{'YES' if self.arm_requested else 'NO'} | AUX:{channel_overrides}",
+                                f"RC -> R:{roll} P:{pitch} Y:{yaw} T:{throttle} | "
+                                f"ARM:{'YES' if self.arm_requested else 'NO'} "
+                                f"(gui={self.gui_arm_requested} joy={joy_wants_arm}) | AUX:{channel_overrides}",
                                 module="FC Link",
                             )
 
@@ -538,7 +689,14 @@ class TrackingWorkerThread(QThread):
                     module="TrackingWorker",
                 )
 
-            time.sleep(0.01)
+            # Pace the loop — without this a fast machine (RTX) spins at 150–300+ FPS,
+            # floods the Qt UI, and makes PID/dt jittery. MSP stays on its own 50 Hz timer.
+            target_fps = float(getattr(self.sys_config.camera, "target_fps", 60.0) or 60.0)
+            target_fps = max(15.0, min(120.0, target_fps))
+            frame_budget = 1.0 / target_fps
+            elapsed = time.time() - frame_start
+            if elapsed < frame_budget:
+                time.sleep(frame_budget - elapsed)
 
         self.disconnect_serial()
         if cap is not None and cap.isOpened():
@@ -566,6 +724,43 @@ class TrackingWorkerThread(QThread):
         dz_px_x = int(w * 0.5 * self.sys_config.offsets.deadzone_norm)
         dz_px_y = int(h * 0.5 * self.sys_config.offsets.deadzone_norm)
         cv2.rectangle(frame, (cx - dz_px_x, cy - dz_px_y), (cx + dz_px_x, cy + dz_px_y), (255, 255, 0), 1)
+
+        # Aim reference: the row the drone actually flies the target onto. With a
+        # tilted camera this sits away from the image centre, which is the point.
+        cam = self.sys_config.camera
+        mount_active = (
+            abs(cam.mount_pitch_deg) > 0.5
+            or abs(cam.mount_roll_deg) > 0.5
+            or abs(cam.mount_yaw_deg) > 0.5
+            or cam.stabilize_with_attitude
+        )
+        if mount_active and str(getattr(cam, "vertical_ref", "level")).startswith("level"):
+            row, tilt_deg = level_reference_line(
+                w,
+                h,
+                cam,
+                self.sys_config.offsets,
+                vehicle_roll_deg=self.controller.vehicle_roll_deg,
+                vehicle_pitch_deg=self.controller.vehicle_pitch_deg,
+                calibrated_focal_px=self.sys_config.distance.focal_length_px,
+            )
+            if -h < row < 2 * h:
+                half_span = int(w * 0.32)
+                dy_tilt = int(math.tan(math.radians(max(-80.0, min(80.0, tilt_deg)))) * half_span)
+                p1 = (cx - half_span, int(np.clip(row - dy_tilt, -5, h + 5)))
+                p2 = (cx + half_span, int(np.clip(row + dy_tilt, -5, h + 5)))
+                cv2.line(frame, p1, p2, (0, 200, 255), 1, cv2.LINE_AA)
+                cv2.putText(
+                    frame,
+                    f"AIM {cam.desired_elevation_deg:+.0f}deg  TILT {cam.mount_pitch_deg:+.0f}deg"
+                    + ("  LVL" if cam.stabilize_with_attitude else ""),
+                    (cx - half_span, max(14, min(h - 6, int(row) - 8))),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45,
+                    (0, 200, 255),
+                    1,
+                    cv2.LINE_AA,
+                )
 
         if locked and bbox is not None:
             bx, by, bw, bh = [int(v) for v in bbox]
@@ -634,6 +829,19 @@ class TrackingWorkerThread(QThread):
                 2,
                 cv2.LINE_AA,
             )
+            brg = self.controller.last_bearing
+            if brg is not None and mount_active:
+                cv2.putText(
+                    frame,
+                    f"AZ {math.degrees(brg.az_rad):+.1f}  EL {math.degrees(brg.el_rad):+.1f}  "
+                    f"LOS {brg.slant_m:.2f}m  dALT {brg.vertical_m:+.2f}m",
+                    (bx, min(h - 8, by + bh + 56)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45,
+                    (0, 200, 255),
+                    1,
+                    cv2.LINE_AA,
+                )
 
         header_color = (0, 255, 0) if safety.is_safe else (0, 0, 255)
         cv2.putText(
@@ -653,6 +861,17 @@ class TrackingWorkerThread(QThread):
             0.55,
             (255, 255, 255),
             2,
+        )
+        follow_color = (80, 220, 120) if self.follow_status.startswith("FOLLOWING") else (0, 180, 255)
+        cv2.putText(
+            frame,
+            f"CTRL: {self.follow_status}  ASSIST:{'ON' if self.assist_enabled else 'OFF'}",
+            (20, h - 52),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.50,
+            follow_color,
+            2,
+            cv2.LINE_AA,
         )
 
     def stop(self) -> None:

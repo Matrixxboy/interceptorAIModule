@@ -40,6 +40,7 @@ class FailsafeManager:
         locked: bool,
         confidence: float,
         distance_m: float | None = None,
+        min_safe_distance_m: float | None = None,
     ) -> SafetyState:
         c = self.cfg
 
@@ -85,18 +86,21 @@ class FailsafeManager:
         self._lost_frames = 0
         self._last_lock_time = time.time()
 
-        # Distance safety check
+        # Distance safety — only hard-fail when well inside min_safe (avoids false FC-style alarms
+        # from noisy uncalibrated distance estimates).
         allow_forward = True
-        if distance_m is not None:
-            if distance_m < 1.0:  # Dangerously close
+        if distance_m is not None and locked:
+            min_safe = float(min_safe_distance_m) if min_safe_distance_m is not None else 2.0
+            min_safe = max(0.2, min_safe)
+            if distance_m < min_safe * 0.35:
                 return SafetyState(
                     is_safe=False,
                     failsafe_active=True,
                     override_active=False,
                     allow_forward_motion=False,
-                    reason=f"Proximity alert! Distance ({distance_m:.2f}m) dangerously low.",
+                    reason=f"Proximity alert! Distance ({distance_m:.2f}m) below safe minimum.",
                 )
-            elif distance_m < 2.0:  # Prevent forward speed
+            elif distance_m < min_safe:
                 allow_forward = False
 
         return SafetyState(

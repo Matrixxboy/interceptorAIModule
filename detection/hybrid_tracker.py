@@ -59,7 +59,7 @@ class HybridYoloLockTracker:
         det_cfg: DetectionConfig | None = None,
         tracker_cfg: TrackerConfig | None = None,
         cv_kind: CvKind = "csrt",
-        yolo_every_n: int = 5,
+        yolo_every_n: int = 12,
         reacquire_iou: float = 0.25,
         max_hold_frames: int = 20,
     ) -> None:
@@ -88,13 +88,22 @@ class HybridYoloLockTracker:
         self._lost = 0
         self._last_dets: list[BBox] = []
         self._manual_lock = False
-
-        self.ensure_detector()
+        self._detector_error: str | None = None
 
     def ensure_detector(self) -> YOLODetector:
+        if self._detector_error is not None:
+            raise RuntimeError(self._detector_error)
         if self.detector is None:
             log.info("Loading YOLO for hybrid lock…")
-            self.detector = YOLODetector(self.det_cfg)
+            try:
+                # Deliberately lazy: this runs in TrackingWorkerThread, never in
+                # the Qt GUI constructor. CUDA startup / weight loading can take
+                # tens of seconds on a newly configured machine.
+                self.detector = YOLODetector(self.det_cfg)
+            except Exception as exc:
+                self._detector_error = f"YOLO unavailable: {exc}"
+                log.exception(self._detector_error)
+                raise RuntimeError(self._detector_error) from exc
         return self.detector
 
     @property
@@ -217,14 +226,23 @@ class HybridYoloLockTracker:
     def update(self, frame: np.ndarray) -> HybridResult:
         self._frame_i += 1
         dets: list[BBox] = []
-        run_yolo = (self._frame_i % self.yolo_every_n) == 0
 
-        if run_yolo or not self._locked:
+        # YOLO is expensive — skip most frames while locked with a healthy scale lock
+        if not self._locked:
+            run_yolo = True
+        elif self.scale_lock.locked and self.scale_lock.last_score >= 0.50:
+            run_yolo = (self._frame_i % 24) == 0
+        else:
+            run_yolo = (self._frame_i % self.yolo_every_n) == 0
+
+        if run_yolo:
             try:
                 dets = self.detect_only(frame)
             except Exception as exc:  # noqa: BLE001
                 log.warning("YOLO detect failed: %s", exc)
                 dets = self._last_dets
+        else:
+            dets = self._last_dets
 
         if not self._locked:
             return HybridResult(False, None, "lost", "", 0.0, dets)
@@ -232,13 +250,18 @@ class HybridYoloLockTracker:
         # 1) Scale-aware lock — authoritative for W/H (distance)
         sc_ok, sc_box = self.scale_lock.update(frame)
 
-        # 2) Optical flow — assist center
-        pix_ok, pix_box, pix_conf, _ = self.pixel_engine.update(frame)
+        # 2) Optical flow — assist center (every other frame when scale lock is strong)
+        pix_ok = False
+        pix_box = None
+        pix_conf = 0.0
+        run_flow = (self._frame_i % 2 == 0) or not sc_ok or self.scale_lock.last_score < 0.55
+        if run_flow:
+            pix_ok, pix_box, pix_conf, _ = self.pixel_engine.update(frame)
 
-        # 3) CSRT/KCF — center only (size capped / ignored)
+        # 3) CSRT/KCF — only if enabled (default off for speed)
         cv_ok = False
         cv_box = None
-        if self._cv is not None:
+        if self._cv is not None and (not sc_ok or self._frame_i % 2 == 1):
             tracking_ok, new_bb = self._cv.update(frame)
             if tracking_ok:
                 x, y, w, h = [float(v) for v in new_bb]
@@ -266,7 +289,10 @@ class HybridYoloLockTracker:
             xywh_f = (cx - sw * 0.5, cy - sh * 0.5, sw, sh)
             target_ok = True
             source = "scale_lock"
-            self._conf = max(0.55, float(self.scale_lock.last_score))
+            # Map NCC score → follow confidence. Raw NCC ~0.55 used to sit under the
+            # 60% follow gate and silently disable AI stick output.
+            score = float(self.scale_lock.last_score)
+            self._conf = max(0.70, min(1.0, 0.55 + 0.60 * max(0.0, score)))
 
         elif pix_ok and pix_box is not None:
             # Fallback: flow box, but do not let CSRT inflate size
@@ -280,7 +306,7 @@ class HybridYoloLockTracker:
                 xywh_f = (float(px), float(py), float(pw), float(ph))
             target_ok = True
             source = "pixel_lock"
-            self._conf = max(0.5, float(pix_conf))
+            self._conf = max(0.65, min(1.0, float(pix_conf)))
 
         elif cv_ok and cv_box is not None:
             if self._bbox_f is not None:
@@ -296,6 +322,7 @@ class HybridYoloLockTracker:
                 xywh_f = cv_box
             target_ok = True
             source = "csrt"
+            self._conf = max(0.65, float(self._conf or 0.65))
 
         xywh = self._as_int(xywh_f) if xywh_f is not None else self._bbox
 

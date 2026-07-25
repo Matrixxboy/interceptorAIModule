@@ -10,11 +10,12 @@ from estimation.distance_calib import bbox_size_px, estimate_distance_m
 
 @dataclass
 class DistanceEstimate:
-    distance_m: float
+    distance_m: float  # Distance the controller regulates (horizontal when mount-corrected)
     distance_error_m: float
     status: str  # "TOO_CLOSE" | "NOMINAL" | "TOO_FAR" | "SAFE"
     recommended_pitch_offset: float
     is_safe: bool
+    slant_m: float = 0.0  # Raw line-of-sight range from apparent size
 
 
 class DistanceEstimator:
@@ -46,9 +47,17 @@ class DistanceEstimator:
         self,
         bbox_width_px: float,
         dt: float = 0.033,
+        distance_m: float | None = None,
     ) -> DistanceEstimate:
+        """Regulate follow distance.
+
+        ``distance_m`` lets the caller substitute a geometry-corrected range
+        (e.g. the horizontal component for a tilted camera) while still
+        reporting the raw line-of-sight range.
+        """
         c = self.cfg
-        dist_m = self.estimate_distance(bbox_width_px)
+        slant_m = self.estimate_distance(bbox_width_px)
+        dist_m = float(distance_m) if distance_m is not None else slant_m
         dt = max(1e-4, float(dt))
 
         # Error: Positive means target is further than desired distance -> drone should move forward
@@ -84,4 +93,5 @@ class DistanceEstimator:
             status=status,
             recommended_pitch_offset=pitch_offset,
             is_safe=is_safe,
+            slant_m=slant_m,
         )

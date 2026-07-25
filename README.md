@@ -271,6 +271,9 @@ mode: DetectionMode = "custom"
 | `Could not open COMx` | Wrong port; unplug other serial tools; check baud |
 | Camera black / wrong feed | Change `CAMERA_INDEX`; close other apps using the cam |
 | YOLO load fails | `pip install ultralytics torch`; keep `yolov8n.pt` in project root |
+| Window freezes / “Not responding” | Run `.venv\Scripts\python.exe main.py --safe-mode`, then `scripts\diagnose_system.py` |
+| RTX GPU is ignored | Diagnostic must show a CUDA build and `CUDA available True`; reinstall PyTorch from its CUDA index. Python 3.11/3.12 has the broadest Windows CUDA wheel support. |
+| Native crash without traceback | Check `%APPDATA%\ArjunaGCS\logs\native_crash.log` and `crash.log` |
 | Low FPS | Raise `YOLO_EVERY_N`, use `TRACKER_TYPE = "KCF"`, install CUDA torch |
 | Tracks but does not follow | Press **E**; confirm ASSIST ON; check ANGLE on CH6 |
 | Follows opposite direction | Flip `yaw_dir` / `pitch_dir` in `FPV_CFG` |

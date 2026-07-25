@@ -45,10 +45,10 @@ class DistanceConfig:
     desired_distance_m: float = 5.0  # Safe nominal follow distance in meters
     min_safe_distance_m: float = 2.0  # Dangerously close threshold
     max_follow_distance_m: float = 25.0  # Maximum follow range
-    kp: float = 120.0
-    ki: float = 15.0
-    kd: float = 25.0
-    max_pitch_offset: float = 200.0  # Pitch stick change for distance correction
+    kp: float = 180.0
+    ki: float = 18.0
+    kd: float = 30.0
+    max_pitch_offset: float = 320.0  # Pitch stick change for distance correction
 
 
 @dataclass
@@ -63,11 +63,15 @@ class PredictionConfig:
 @dataclass
 class SafetyConfig:
     min_conf_threshold: float = 0.35
+    follow_min_confidence: float = 0.60  # Only follow when detection conf ≥ this
+    follow_speed_scale: float = 0.50  # Global gentleness: scales yaw/throttle offsets + slew (0..1)
+    follow_pitch_scale: float = 0.90  # Extra scale for pitch/distance chase (higher = close faster)
     max_lost_frames: int = 45
     reacquisition_timeout_s: float = 2.5
     max_yaw_rate: float = 1600.0  # µs/s slew limit
     max_climb_rate: float = 1400.0  # µs/s slew limit
     max_descent_rate: float = 1200.0  # µs/s slew limit
+    max_pitch_rate: float = 2200.0  # µs/s slew for forward/back distance pitch
     max_forward_speed: float = 350.0  # max pitch µs offset forward
     max_backward_speed: float = 250.0  # max pitch µs offset backward
     max_acceleration: float = 1800.0  # µs/s^2 acceleration limit
@@ -88,6 +92,15 @@ class CameraConfig:
     frame_width: int = 1280
     frame_height: int = 720
     camera_index: int = 1
+    target_fps: float = 60.0  # Cap vision loop (uncapped races to 200–300+ FPS on fast GPUs)
+    # --- Mount geometry: lets the camera sit at ANY angle, not just straight ahead ---
+    mount_pitch_deg: float = 0.0  # + = tilted UP (typical FPV cruise tilt 15–30°)
+    mount_roll_deg: float = 0.0  # + = rotated clockwise in the image
+    mount_yaw_deg: float = 0.0  # + = aimed right of the nose
+    stabilize_with_attitude: bool = False  # Subtract live FC roll/pitch → gravity-levelled aim
+    vertical_ref: Literal["level", "image"] = "level"  # "level" = mount-corrected, "image" = legacy
+    desired_elevation_deg: float = 0.0  # Elevation to hold the target at (0 = same height as us)
+    use_calibrated_focal: bool = True  # Prefer measured focal length over nominal FOV for angles
 
 
 @dataclass
@@ -118,7 +131,7 @@ class TrackerConfig:
     max_age: int = 45
     min_hits: int = 2
     iou_match_threshold: float = 0.25
-    lock_tracker: Literal["csrt", "kcf", "none"] = "csrt"
+    lock_tracker: Literal["csrt", "kcf", "none"] = "none"  # none = faster; scale lock handles size
     reacquire_iou: float = 0.12
     reacquire_max_frames: int = 90
     enable_template_fallback: bool = True

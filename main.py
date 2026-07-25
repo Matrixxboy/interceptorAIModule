@@ -9,42 +9,73 @@ Supports --legacy flag for the previous main window layout.
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import os
 import sys
+import threading
+import traceback
 
 os.environ["OPENCV_LOG_LEVEL"] = "OFF"
 os.environ["OPENCV_VIDEOINPUT_MSMF_ENABLE_HW_TRANSFORMS"] = "0"
 
-from paths import BUNDLE_DIR, ROOT
+from paths import LOGS_DIR, ROOT
 
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from config import SystemConfig
 
+_FAULT_LOG = None
+
+
+def install_crash_logging() -> None:
+    """Persist Python and native crash details even when launched without a console."""
+    global _FAULT_LOG
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    crash_path = LOGS_DIR / "crash.log"
+    native_path = LOGS_DIR / "native_crash.log"
+
+    def write_exception(exc_type, exc_value, exc_tb) -> None:
+        with crash_path.open("a", encoding="utf-8") as stream:
+            stream.write("\n=== Unhandled exception ===\n")
+            traceback.print_exception(exc_type, exc_value, exc_tb, file=stream)
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+    sys.excepthook = write_exception
+    if hasattr(threading, "excepthook"):
+        def thread_exception(args) -> None:
+            write_exception(args.exc_type, args.exc_value, args.exc_traceback)
+        threading.excepthook = thread_exception
+
+    try:
+        _FAULT_LOG = native_path.open("a", encoding="utf-8")
+        faulthandler.enable(file=_FAULT_LOG, all_threads=True)
+    except (OSError, RuntimeError):
+        _FAULT_LOG = None
+
 
 def run_gui(cfg: SystemConfig, legacy: bool = False) -> None:
     try:
         from PyQt6.QtWidgets import QApplication
-
-        app = QApplication(sys.argv)
-        app.setApplicationName("Arjuna")
-        app.setOrganizationName("Arjuna GCS")
-
-        if legacy:
-            from gui.main_window import MainWindow
-            window = MainWindow(cfg)
-        else:
-            from gui.arjuna_shell import ArjunaShell
-            window = ArjunaShell(cfg)
-
-        window.show()
-        sys.exit(app.exec())
-    except Exception as e:
-        import traceback
+    except ImportError as e:
         print(f"[WARN] PyQt6 GUI unavailable ({e}). Falling back to CLI mode.")
         traceback.print_exc()
         run_cli(cfg)
+        return
+
+    app = QApplication(sys.argv)
+    app.setApplicationName("Arjuna")
+    app.setOrganizationName("Arjuna GCS")
+
+    if legacy:
+        from gui.main_window import MainWindow
+        window = MainWindow(cfg)
+    else:
+        from gui.arjuna_shell import ArjunaShell
+        window = ArjunaShell(cfg)
+
+    window.show()
+    sys.exit(app.exec())
 
 
 def run_cli(cfg: SystemConfig) -> None:
@@ -102,10 +133,21 @@ def run_cli(cfg: SystemConfig) -> None:
 
 
 def main() -> None:
+    install_crash_logging()
     parser = argparse.ArgumentParser(description="Arjuna — AI Target Tracking & Drone Control GCS")
     parser.add_argument("--cli", action="store_true", help="Run in OpenCV CLI mode instead of PyQt6 GUI")
     parser.add_argument("--legacy", action="store_true", help="Use legacy main window layout")
     parser.add_argument("--config", type=str, default=None, help="Path to JSON configuration preset")
+    parser.add_argument(
+        "--cpu",
+        action="store_true",
+        help="Disable CUDA/FP16 (use this to diagnose NVIDIA/PyTorch compatibility)",
+    )
+    parser.add_argument(
+        "--safe-mode",
+        action="store_true",
+        help="Start conservatively on CPU with optional controllers disabled",
+    )
     args = parser.parse_args()
 
     cfg = SystemConfig()
@@ -114,6 +156,13 @@ def main() -> None:
     else:
         from estimation.distance_calib import load_distance_calib
         load_distance_calib(cfg)
+
+    if args.cpu or args.safe_mode:
+        cfg.detection.device = "cpu"
+        cfg.detection.half = False
+    if args.safe_mode:
+        cfg.joystick.enabled = False
+        cfg.camera.stabilize_with_attitude = False
 
     if args.cli:
         run_cli(cfg)

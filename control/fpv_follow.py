@@ -9,6 +9,7 @@ from config import SystemConfig
 from control.pid_controller import PIDController
 from estimation.distance_estimator import DistanceEstimate, DistanceEstimator
 from tracking.motion_predictor import MotionPredictor, TrajectoryEstimate
+from vision.camera_geometry import TargetBearing, solve_bearing
 
 
 def clamp(val: float, lo: float, hi: float) -> float:
@@ -71,6 +72,10 @@ class FPVFollowController:
         self.distance_estimator = DistanceEstimator(self.sys_cfg.distance)
         self.motion_predictor = MotionPredictor(self.sys_cfg.prediction)
 
+        # Live airframe attitude (only used when camera stabilization is enabled)
+        self.vehicle_roll_deg = 0.0
+        self.vehicle_pitch_deg = 0.0
+
         self.reset()
 
     def update_sys_config(self, sys_cfg: SystemConfig) -> None:
@@ -97,6 +102,12 @@ class FPVFollowController:
 
         self.last_trajectory: TrajectoryEstimate | None = None
         self.last_distance: DistanceEstimate | None = None
+        self.last_bearing: TargetBearing | None = None
+
+    def set_vehicle_attitude(self, roll_deg: float, pitch_deg: float) -> None:
+        """Feed FC attitude so a fixed camera can be levelled against gravity."""
+        self.vehicle_roll_deg = float(roll_deg)
+        self.vehicle_pitch_deg = float(pitch_deg)
 
     def update(
         self,
@@ -128,13 +139,6 @@ class FPVFollowController:
             size_src = (0.0, 0.0, 50.0, 50.0)
         axis = getattr(self.sys_cfg.distance, "size_axis", "width") or "width"
         size_px = bbox_size_px(size_src, axis)
-        dist_est = self.distance_estimator.compute_following_control(size_px, dt)
-        self.last_distance = dist_est
-
-        half_w = max(1.0, frame_w * 0.5)
-        half_h = max(1.0, frame_h * 0.5)
-        frame_cx = frame_w * 0.5 + self.sys_cfg.offsets.horizontal_offset_norm * half_w
-        frame_cy = frame_h * 0.5 + self.sys_cfg.offsets.vertical_offset_norm * half_h
 
         # Steer to the LOCK BOX CENTER only (no Kalman lead / green aim point)
         if bbox_xywh is not None:
@@ -145,8 +149,31 @@ class FPVFollowController:
             box_cx = sb[0] + sb[2] * 0.5
             box_cy = sb[1] + sb[3] * 0.5
 
-        nx = clamp((box_cx - frame_cx) / half_w, -1.0, 1.0)
-        ny = clamp((box_cy - frame_cy) / half_h, -1.0, 1.0)
+        # Mount-corrected bearing: works for a camera at any tilt / roll / yaw.
+        # The pinhole size gives a line-of-sight range, so resolve it against the
+        # true elevation before regulating follow distance.
+        slant_m = self.distance_estimator.estimate_distance(size_px)
+        bearing = solve_bearing(
+            box_cx,
+            box_cy,
+            frame_w,
+            frame_h,
+            self.sys_cfg.camera,
+            self.sys_cfg.offsets,
+            slant_m=slant_m,
+            vehicle_roll_deg=self.vehicle_roll_deg,
+            vehicle_pitch_deg=self.vehicle_pitch_deg,
+            calibrated_focal_px=self.sys_cfg.distance.focal_length_px,
+        )
+        self.last_bearing = bearing
+
+        dist_est = self.distance_estimator.compute_following_control(
+            size_px, dt, distance_m=bearing.ground_m
+        )
+        self.last_distance = dist_est
+
+        nx = bearing.nx
+        ny = bearing.ny
 
         # PID calculations:
         # yaw_pid controls horizontal error nx (left/right yaw rotation)
@@ -155,15 +182,24 @@ class FPVFollowController:
         # altitude_pid controls vertical error ny (climb / descend throttle response)
         alt_res = self.altitude_pid.update(ny, dt, deadzone=c.deadzone_norm, expo=c.expo)
 
-        # Yaw: nx > 0 (target is right) -> yaw right (+offset)
-        yaw_off = c.yaw_dir * yaw_res.output
+        # Global gentleness scale — yaw / throttle stay mild; pitch has its own scale
+        speed_scale = clamp(float(getattr(self.sys_cfg.safety, "follow_speed_scale", 0.50)), 0.05, 1.0)
+        pitch_scale = clamp(float(getattr(self.sys_cfg.safety, "follow_pitch_scale", 0.90)), 0.05, 1.5)
 
-        # Pitch: target smaller/farther -> pitch forward (+offset), target larger/closer -> pitch backward (-offset)
-        pitch_off = c.pitch_dir * dist_est.recommended_pitch_offset
+        # Yaw: nx > 0 (target is right) -> yaw right (+offset)
+        yaw_off = c.yaw_dir * yaw_res.output * speed_scale
+
+        # Pitch: target smaller/farther -> pitch forward, closer -> pitch backward
+        raw_pitch = float(dist_est.recommended_pitch_offset) * pitch_scale
+        # Respect per-direction caps from safety config
+        fwd_cap = float(getattr(self.sys_cfg.safety, "max_forward_speed", 350.0))
+        back_cap = float(getattr(self.sys_cfg.safety, "max_backward_speed", 250.0))
+        raw_pitch = clamp(raw_pitch, -back_cap, fwd_cap)
+        pitch_off = c.pitch_dir * raw_pitch
 
         # Throttle: ny < 0 (target is higher than center) -> increase throttle to climb
         # ny > 0 (target is lower than center) -> decrease throttle to descend
-        throttle_off = -alt_res.output
+        throttle_off = -alt_res.output * speed_scale
 
         roll_off = 0.0
 
@@ -176,10 +212,17 @@ class FPVFollowController:
             step = rate * dt
             return cur + clamp(tgt - cur, -step, step)
 
-        self._cmd_yaw = slew(self._cmd_yaw, target_yaw, self.sys_cfg.safety.max_yaw_rate)
-        self._cmd_pitch = slew(self._cmd_pitch, target_pitch, self.sys_cfg.safety.max_climb_rate)
-        self._cmd_roll = slew(self._cmd_roll, target_roll, c.slew_roll)
-        self._cmd_throttle = slew(getattr(self, '_cmd_throttle', float(base_throttle)), target_throttle, 1200.0)
+        # Scale slew rates gently — keep a floor so small speed_scale still moves
+        slew_scale = max(0.45, speed_scale)
+        pitch_slew = float(getattr(self.sys_cfg.safety, "max_pitch_rate", 2200.0)) * max(0.55, pitch_scale)
+        self._cmd_yaw = slew(self._cmd_yaw, target_yaw, self.sys_cfg.safety.max_yaw_rate * slew_scale)
+        self._cmd_pitch = slew(self._cmd_pitch, target_pitch, pitch_slew)
+        self._cmd_roll = slew(self._cmd_roll, target_roll, c.slew_roll * slew_scale)
+        self._cmd_throttle = slew(
+            getattr(self, "_cmd_throttle", float(base_throttle)),
+            target_throttle,
+            1200.0 * slew_scale,
+        )
 
         roll = int(clamp(self._cmd_roll, float(c.rc_min), float(c.rc_max)))
         pitch = int(clamp(self._cmd_pitch, float(c.rc_min), float(c.rc_max)))

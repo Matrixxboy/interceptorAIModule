@@ -100,7 +100,7 @@ class MainWindow(QMainWindow):
         cam_layout.addWidget(self.combo_cameras, stretch=1)
         cam_layout.addWidget(btn_refresh_cams)
 
-        self._refresh_camera_devices()
+        self._refresh_camera_devices(probe=False)
 
         self.video_widget = VideoDisplayWidget()
         self.video_widget.roi_selected.connect(self._on_roi_selected)
@@ -212,10 +212,14 @@ class MainWindow(QMainWindow):
 
         self.statusBar().showMessage("System initialized. Select video capture device or COM port.")
 
-    def _refresh_camera_devices(self) -> None:
+    def _refresh_camera_devices(self, _checked: bool = False, probe: bool = True) -> None:
         self.combo_cameras.blockSignals(True)
         self.combo_cameras.clear()
-        devices = list_camera_devices()
+        if probe:
+            devices = list_camera_devices()
+        else:
+            idx = int(self.sys_config.camera.camera_index)
+            devices = [(idx, f"Configured Camera {idx}")]
         for idx, label in devices:
             self.combo_cameras.addItem(label, idx)
         self.combo_cameras.blockSignals(False)

@@ -235,17 +235,18 @@ def make_rc_channels(
     ch[6] = clamp(aux3 if aux3 is not None else RC_MID, RC_MIN, RC_MAX)
     ch[7] = clamp(aux4 if aux4 is not None else RC_MID, RC_MIN, RC_MAX)
 
-    # Apply configured ARM / Mode channels (may be same as AUX1/AUX2)
-    a_ch = max(0, min(NUM_CHANNELS - 1, int(arm_channel)))
-    m_ch = max(0, min(NUM_CHANNELS - 1, int(mode_channel)))
-    ch[a_ch] = clamp(arm_high if arm else arm_low, RC_MIN, RC_MAX)
-    ch[m_ch] = clamp(mode_high if flight_mode else mode_low, RC_MIN, RC_MAX)
-
-    # Explicit per-channel overrides (joystick AUX mapping, etc.)
+    # Explicit per-channel overrides first (joystick AUX mapping, etc.)
     if channel_overrides:
         for idx, pwm in channel_overrides.items():
             i = int(idx)
             if 0 <= i < NUM_CHANNELS:
                 ch[i] = clamp(pwm, RC_MIN, RC_MAX)
+
+    # ARM / Mode MUST win after overrides so software + remote arm state is consistent
+    # and a released AUX button cannot silently disarm under an active ARM request.
+    a_ch = max(0, min(NUM_CHANNELS - 1, int(arm_channel)))
+    m_ch = max(0, min(NUM_CHANNELS - 1, int(mode_channel)))
+    ch[a_ch] = clamp(arm_high if arm else arm_low, RC_MIN, RC_MAX)
+    ch[m_ch] = clamp(mode_high if flight_mode else mode_low, RC_MIN, RC_MAX)
 
     return ch

@@ -20,7 +20,34 @@ class MAVLinkController(FlightController):
         self.logger = logging.getLogger("MAVLinkController")
         self.sys_log = SystemLogger()
         self._armed = False
+        self._flight_mode = "ANGLE"
         self._last_log_time = 0.0
+        self._channel_overrides: dict[int, int] = {}
+        self.arm_channel = 4
+        self.mode_channel = 5
+        self.arm_high = 1800
+        self.arm_low = 1000
+        self.mode_high = 1900
+        self.mode_low = 1000
+
+    def set_channel_overrides(self, overrides: dict[int, int] | None) -> None:
+        self._channel_overrides = dict(overrides or {})
+
+    def update_aux_config(
+        self,
+        arm_channel: int = 4,
+        mode_channel: int = 5,
+        arm_high: int = 1800,
+        arm_low: int = 1000,
+        mode_high: int = 1900,
+        mode_low: int = 1000,
+    ) -> None:
+        self.arm_channel = int(arm_channel)
+        self.mode_channel = int(mode_channel)
+        self.arm_high = int(arm_high)
+        self.arm_low = int(arm_low)
+        self.mode_high = int(mode_high)
+        self.mode_low = int(mode_low)
 
     def connect(self) -> bool:
         if mavutil is None:
@@ -81,29 +108,48 @@ class MAVLinkController(FlightController):
     def send_control(self, roll: int, pitch: int, yaw: int, throttle: int) -> None:
         if not self.is_connected():
             return
-            
-        # Send RC Override
-        # Channel map (AETR): 1=Roll, 2=Pitch, 3=Throttle, 4=Yaw
-        # AUX1 (Ch 5) = Arm switch (2000 = Arm, 1000 = Disarm)
-        # AUX2 (Ch 6) = Flight Mode switch (1800..2000 = Angle Mode, <1800 = Acro Mode)
-        ch5 = 2000 if self._armed else 1000
-        mode_str = getattr(self, '_flight_mode', 'ANGLE').upper()
-        ch6 = 1900 if mode_str == "ANGLE" else 1000
-        
-        # 65535 prevents RC Failsafe on unused channels
+
+        # Build 8-channel RC: AETR + AUX arm/mode (+ overrides)
+        ch = [65535] * 8
+        ch[0], ch[1], ch[2], ch[3] = int(roll), int(pitch), int(throttle), int(yaw)
+
+        mode_str = getattr(self, "_flight_mode", "ANGLE").upper()
+        arm_idx = max(0, min(7, int(getattr(self, "arm_channel", 4))))
+        mode_idx = max(0, min(7, int(getattr(self, "mode_channel", 5))))
+        ch[arm_idx] = int(self.arm_high if self._armed else self.arm_low)
+        ch[mode_idx] = int(self.mode_high if mode_str == "ANGLE" else self.mode_low)
+
+        for idx, pwm in getattr(self, "_channel_overrides", {}).items():
+            i = int(idx)
+            if 0 <= i < 8:
+                ch[i] = int(pwm)
+        # Re-assert arm/mode after overrides
+        ch[arm_idx] = int(self.arm_high if self._armed else self.arm_low)
+        ch[mode_idx] = int(self.mode_high if mode_str == "ANGLE" else self.mode_low)
+
         self.master.mav.rc_channels_override_send(
-            self.master.target_system, self.master.target_component,
-            roll, pitch, throttle, yaw, ch5, ch6, 65535, 65535
+            self.master.target_system,
+            self.master.target_component,
+            ch[0], ch[1], ch[2], ch[3], ch[4], ch[5], ch[6], ch[7],
         )
-        
+
         now = time.time()
         if now - self._last_log_time >= 1.0:
             self.sys_log.log(
                 LogCategory.DRONE,
-                f"MAVLink RC sent: R{roll} P{pitch} Y{yaw} T{throttle} | AUX1(Arm):{ch5} AUX2(Mode {mode_str}):{ch6}",
-                module="MAVLink"
+                f"MAVLink RC: R{ch[0]} P{ch[1]} T{ch[2]} Y{ch[3]} | "
+                f"ARM(ch{arm_idx+1}):{ch[arm_idx]} MODE:{ch[mode_idx]}",
+                module="MAVLink",
             )
             self._last_log_time = now
+
+    def get_attitude(self) -> Dict[str, float]:
+        """Latest roll/pitch/yaw in degrees — used for camera levelling."""
+        tel = self.get_telemetry()
+        att = {k: tel[k] for k in ("roll_deg", "pitch_deg", "yaw_deg") if k in tel}
+        if att:
+            self._last_attitude = att
+        return att or getattr(self, "_last_attitude", {})
 
     def get_telemetry(self) -> Dict[str, Any]:
         telemetry = {}

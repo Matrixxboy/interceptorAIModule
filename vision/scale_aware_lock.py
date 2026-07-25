@@ -1,4 +1,7 @@
-"""Multi-scale template lock so bbox pixel size tracks distance changes."""
+"""Multi-scale template lock so bbox pixel size tracks distance changes.
+
+Optimized for realtime: few scales, downscaled NCC, full search every N frames.
+"""
 
 from __future__ import annotations
 
@@ -7,21 +10,20 @@ import numpy as np
 
 
 class ScaleAwareLock:
-    """Template lock that searches across scales so pixel size tracks distance.
-
-    Size comes from multi-scale NCC. Optional CSRT is used for center only and
-    is size-capped so it cannot inflate the box into the background.
-    """
+    """Template lock that searches across scales so pixel size tracks distance."""
 
     def __init__(self, use_csrt: bool = False) -> None:
         self.use_csrt = use_csrt
         self._template: np.ndarray | None = None
+        self._template_small: np.ndarray | None = None
         self._bbox: tuple[float, float, float, float] | None = None
         self._scale = 1.0
         self._misses = 0
         self._csrt = None
         self._last_score = 0.0
         self._frames = 0
+        self._full_every = 2  # full multi-scale every N frames
+        self._match_max_side = 96  # downscale template for faster NCC
 
     @property
     def scale(self) -> float:
@@ -52,12 +54,23 @@ class ScaleAwareLock:
 
     def reset(self) -> None:
         self._template = None
+        self._template_small = None
         self._bbox = None
         self._scale = 1.0
         self._misses = 0
         self._csrt = None
         self._last_score = 0.0
         self._frames = 0
+
+    def _shrink_template(self, gray_patch: np.ndarray) -> np.ndarray:
+        h, w = gray_patch.shape[:2]
+        side = max(h, w)
+        if side <= self._match_max_side:
+            return gray_patch
+        scale = self._match_max_side / float(side)
+        nw = max(8, int(round(w * scale)))
+        nh = max(8, int(round(h * scale)))
+        return cv2.resize(gray_patch, (nw, nh), interpolation=cv2.INTER_AREA)
 
     def init(self, frame_bgr: np.ndarray, bbox_xywh: tuple[float, float, float, float]) -> bool:
         try:
@@ -72,7 +85,9 @@ class ScaleAwareLock:
             patch = frame_bgr[y : y + h, x : x + w]
             if patch is None or patch.size == 0 or patch.shape[0] < 8 or patch.shape[1] < 8:
                 return False
-            self._template = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
+            gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
+            self._template = gray
+            self._template_small = self._shrink_template(gray)
             self._bbox = (float(x), float(y), float(w), float(h))
             self._scale = 1.0
             self._misses = 0
@@ -91,53 +106,86 @@ class ScaleAwareLock:
             self.reset()
             return False
 
-    def _multiscale_match(self, gray: np.ndarray) -> tuple[float, float, float, float, float] | None:
-        if self._template is None or self._bbox is None:
+    def _match_scales(
+        self,
+        gray: np.ndarray,
+        scales: list[float],
+    ) -> tuple[float, float, float, float, float] | None:
+        if self._template is None or self._bbox is None or self._template_small is None:
             return None
         x, y, w, h = self._bbox
         tw0, th0 = self._template.shape[1], self._template.shape[0]
         if tw0 < 4 or th0 < 4:
             return None
 
-        # Wide enough band to track approach/recede; still local around current scale
-        lo = max(0.35, self._scale * 0.62)
-        hi = min(2.8, self._scale * 1.55)
-        scales = [float(s) for s in np.linspace(lo, hi, 13)]
+        # Match on downscaled template; map size back to original template scale
+        ts = self._template_small
+        tsw, tsh = ts.shape[1], ts.shape[0]
+        shrink = tsw / float(tw0)
 
-        pad = max(120, int(max(w, h) * 1.6))
+        pad = max(64, int(max(w, h) * 1.15))
         fh, fw = gray.shape[:2]
         x0 = max(0, int(x) - pad)
         y0 = max(0, int(y) - pad)
         x1 = min(fw, int(x + w) + pad)
         y1 = min(fh, int(y + h) + pad)
-        roi = gray[y0:y1, x0:x1]
-        if roi.size == 0 or roi.shape[0] < 16 or roi.shape[1] < 16:
+        roi_full = gray[y0:y1, x0:x1]
+        if roi_full.size == 0 or roi_full.shape[0] < 16 or roi_full.shape[1] < 16:
             return None
+
+        # Downscale ROI by same factor as template for faster NCC
+        if shrink < 0.999:
+            roi = cv2.resize(
+                roi_full,
+                (max(16, int(round(roi_full.shape[1] * shrink))),
+                 max(16, int(round(roi_full.shape[0] * shrink)))),
+                interpolation=cv2.INTER_AREA,
+            )
+            inv = 1.0 / shrink
+        else:
+            roi = roi_full
+            inv = 1.0
 
         best = None
         for s in scales:
-            tw = max(8, int(round(tw0 * s)))
-            th = max(8, int(round(th0 * s)))
+            tw = max(8, int(round(tsw * s)))
+            th = max(8, int(round(tsh * s)))
             if tw >= roi.shape[1] - 2 or th >= roi.shape[0] - 2:
                 continue
             try:
-                tmpl = cv2.resize(self._template, (tw, th), interpolation=cv2.INTER_AREA)
-                if tmpl.shape[0] >= roi.shape[0] or tmpl.shape[1] >= roi.shape[1]:
-                    continue
+                tmpl = cv2.resize(ts, (tw, th), interpolation=cv2.INTER_AREA)
                 res = cv2.matchTemplate(roi, tmpl, cv2.TM_CCOEFF_NORMED)
                 _, max_val, _, max_loc = cv2.minMaxLoc(res)
             except Exception:
                 continue
+            # Map back to full-resolution coords / size
+            nx = float(x0 + max_loc[0] * inv)
+            ny = float(y0 + max_loc[1] * inv)
+            nw = float(tw * inv)
+            nh = float(th * inv)
             if best is None or max_val > best[0]:
-                best = (float(max_val), float(x0 + max_loc[0]), float(y0 + max_loc[1]), float(tw), float(th), s)
+                best = (float(max_val), nx, ny, nw, nh, float(s))
 
         if best is None or best[0] < 0.38:
             return None
         score, nx, ny, nw, nh, s = best
-        # Smooth scale but allow real approach/recede
-        self._scale = 0.55 * self._scale + 0.45 * s
+        self._scale = 0.60 * self._scale + 0.40 * s
         self._last_score = score
         return (nx, ny, nw, nh, score)
+
+    def _multiscale_match(self, gray: np.ndarray, full: bool) -> tuple[float, float, float, float, float] | None:
+        if full:
+            lo = max(0.40, self._scale * 0.70)
+            hi = min(2.4, self._scale * 1.40)
+            scales = [float(s) for s in np.linspace(lo, hi, 7)]
+        else:
+            # Fast path: 3 local scales around current
+            scales = [
+                max(0.40, self._scale * 0.92),
+                self._scale,
+                min(2.4, self._scale * 1.08),
+            ]
+        return self._match_scales(gray, scales)
 
     def update(self, frame_bgr: np.ndarray) -> tuple[bool, tuple[float, float, float, float] | None]:
         if self._template is None:
@@ -145,7 +193,8 @@ class ScaleAwareLock:
         try:
             self._frames += 1
             gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-            ms = self._multiscale_match(gray)
+            full = (self._frames % self._full_every) == 0 or self._misses > 0
+            ms = self._multiscale_match(gray, full=full)
 
             csrt_box = None
             if self._csrt is not None:
@@ -158,7 +207,6 @@ class ScaleAwareLock:
 
             if ms is not None:
                 nx, ny, nw, nh, score = ms
-                # Center blend with CSRT only; size always from multi-scale match
                 if csrt_box is not None:
                     cx = 0.70 * (nx + nw * 0.5) + 0.30 * (csrt_box[0] + csrt_box[2] * 0.5)
                     cy = 0.70 * (ny + nh * 0.5) + 0.30 * (csrt_box[1] + csrt_box[3] * 0.5)
@@ -167,8 +215,7 @@ class ScaleAwareLock:
                     self._bbox = (nx, ny, nw, nh)
                 self._misses = 0
 
-                # Refresh template occasionally when match is strong (reduces drift)
-                if score >= 0.72 and self._frames % 45 == 0 and self._bbox is not None:
+                if score >= 0.75 and self._frames % 60 == 0 and self._bbox is not None:
                     bx, by, bw, bh = [int(round(v)) for v in self._bbox]
                     fh, fw = frame_bgr.shape[:2]
                     bx = max(0, min(bx, fw - 2))
@@ -177,8 +224,10 @@ class ScaleAwareLock:
                     bh = max(12, min(bh, fh - by))
                     patch = frame_bgr[by : by + bh, bx : bx + bw]
                     if patch.size > 0 and patch.shape[0] >= 8 and patch.shape[1] >= 8:
-                        self._template = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
-                        self._scale = 1.0  # template is new base scale
+                        gray_p = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
+                        self._template = gray_p
+                        self._template_small = self._shrink_template(gray_p)
+                        self._scale = 1.0
 
                 return True, self._bbox
 
@@ -187,11 +236,9 @@ class ScaleAwareLock:
                 cx = csrt_box[0] + csrt_box[2] * 0.5
                 cy = csrt_box[1] + csrt_box[3] * 0.5
                 cw, ch = csrt_box[2], csrt_box[3]
-                # Reject CSRT size explosion — keep last size, move center only
                 if cw > 2.2 * lw or ch > 2.2 * lh or cw < 0.45 * lw or ch < 0.45 * lh:
                     self._bbox = (cx - lw * 0.5, cy - lh * 0.5, lw, lh)
                 else:
-                    # Mild size EMA toward CSRT when reasonable
                     nw = 0.85 * lw + 0.15 * cw
                     nh = 0.85 * lh + 0.15 * ch
                     self._bbox = (cx - nw * 0.5, cy - nh * 0.5, nw, nh)

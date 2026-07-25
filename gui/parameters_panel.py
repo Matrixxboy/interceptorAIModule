@@ -101,6 +101,9 @@ class ParametersPanel(QWidget):
         self.sp_vert_off = _dspin(c.offsets.vertical_offset_norm, -0.5, 0.5, 0.05, 2)
         self.sp_lead = _dspin(c.prediction.lead_time_s, 0.0, 1.0, 0.02, 2)
         self.sp_conf_thresh = _dspin(c.safety.min_conf_threshold, 0.1, 0.95, 0.05, 2)
+        self.sp_follow_conf = _dspin(c.safety.follow_min_confidence, 0.3, 0.95, 0.05, 2)
+        self.sp_follow_speed = _dspin(c.safety.follow_speed_scale, 0.05, 1.0, 0.05, 2)
+        self.sp_follow_pitch = _dspin(c.safety.follow_pitch_scale, 0.1, 1.5, 0.05, 2)
         self.sp_max_lost = _ispin(c.safety.max_lost_frames, 5, 200)
         self.chk_kalman = QCheckBox("Kalman prediction")
         self.chk_kalman.setChecked(c.prediction.enable_kalman)
@@ -117,6 +120,9 @@ class ParametersPanel(QWidget):
             (4, 0, "V offset", self.sp_vert_off),
             (4, 2, "Min confidence", self.sp_conf_thresh),
             (5, 0, "Max lost frames", self.sp_max_lost),
+            (5, 2, "Follow conf ≥", self.sp_follow_conf),
+            (6, 0, "Follow speed", self.sp_follow_speed),
+            (6, 2, "Pitch follow", self.sp_follow_pitch),
         ]
         for row, col, text, widget in fields:
             grid.addWidget(_lbl(text), row, col)
@@ -124,7 +130,7 @@ class ParametersPanel(QWidget):
             widget.valueChanged.connect(self._on_param_change)
 
         self.chk_kalman.toggled.connect(self._on_param_change)
-        grid.addWidget(self.chk_kalman, 6, 0, 1, 4)
+        grid.addWidget(self.chk_kalman, 8, 0, 1, 4)
 
         root.addWidget(box)
         root.addStretch(1)
@@ -150,6 +156,9 @@ class ParametersPanel(QWidget):
         self.sys_config.prediction.enable_kalman = self.chk_kalman.isChecked()
         self.sys_config.prediction.lead_time_s = self.sp_lead.value()
         self.sys_config.safety.min_conf_threshold = self.sp_conf_thresh.value()
+        self.sys_config.safety.follow_min_confidence = self.sp_follow_conf.value()
+        self.sys_config.safety.follow_speed_scale = self.sp_follow_speed.value()
+        self.sys_config.safety.follow_pitch_scale = self.sp_follow_pitch.value()
         self.sys_config.safety.max_lost_frames = self.sp_max_lost.value()
         self.params_updated.emit()
 
@@ -174,7 +183,8 @@ class ParametersPanel(QWidget):
         widgets = [
             self.sp_desired_dist, self.sp_min_dist, self.sp_max_dist, self.sp_known_w,
             self.sp_focal, self.sp_deadzone, self.sp_horiz_off, self.sp_vert_off, self.sp_lead,
-            self.sp_conf_thresh, self.sp_max_lost, self.chk_kalman,
+            self.sp_conf_thresh, self.sp_follow_conf, self.sp_follow_speed, self.sp_follow_pitch,
+            self.sp_max_lost, self.chk_kalman,
         ]
         for w in widgets:
             w.blockSignals(True)
@@ -189,6 +199,9 @@ class ParametersPanel(QWidget):
         self.chk_kalman.setChecked(cfg.prediction.enable_kalman)
         self.sp_lead.setValue(cfg.prediction.lead_time_s)
         self.sp_conf_thresh.setValue(cfg.safety.min_conf_threshold)
+        self.sp_follow_conf.setValue(cfg.safety.follow_min_confidence)
+        self.sp_follow_speed.setValue(cfg.safety.follow_speed_scale)
+        self.sp_follow_pitch.setValue(cfg.safety.follow_pitch_scale)
         self.sp_max_lost.setValue(cfg.safety.max_lost_frames)
         for w in widgets:
             w.blockSignals(False)
