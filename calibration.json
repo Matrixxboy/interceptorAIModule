@@ -7,7 +7,7 @@
   "use_yolo": true,
   "yolo_every_n": 2,
   "tracker_type": "CSRT",
-  "min_bbox_area": 250,
+  "min_bbox_area": 25
   "max_lost_frames": 60,
   "send_hz": 50,
   "mode_on_value": 1900,

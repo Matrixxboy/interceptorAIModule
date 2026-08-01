@@ -279,7 +279,7 @@ class LiveFeedPage(QWidget):
         self.telemetry_plots.setMinimumHeight(180)
         self.img_proc_widget = ImageProcessingWidget()
 
-        right_tabs.addTab(self.pid_panel, "PID")
+        right_tabs.addTab(self.pid_panel, "Control")
         right_tabs.addTab(self.params_panel, "Params")
         right_tabs.addTab(self.telemetry_plots, "Charts")
         right_tabs.addTab(self.img_proc_widget, "Vision")

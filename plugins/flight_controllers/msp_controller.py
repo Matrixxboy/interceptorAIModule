@@ -117,6 +117,13 @@ class MSPController(FlightController):
         try:
             self.ser.write(msp_link.build_msp_set_raw_rc(channels))
             self._armed = True
+            # Read back FC status to surface any arming-disable reasons
+            disable_reasons = self._query_arming_disable_flags()
+            if disable_reasons:
+                self.logger.warning(
+                    f"FC arming blocked by flags: {', '.join(disable_reasons)}. "
+                    "Check Betaflight: enable 'feature RX_MSP' and ensure throttle is low."
+                )
             return True
         except Exception as e:
             self.logger.error(f"Failed to send arm command: {e}")
@@ -155,6 +162,21 @@ class MSPController(FlightController):
         except Exception as e:
             self.logger.error(f"Failed to send control command: {e}")
 
+    def _query_arming_disable_flags(self) -> list[str]:
+        """Poll MSP_STATUS_EX and return active arming-disable reason names."""
+        if not self.is_connected():
+            return []
+        try:
+            self.ser.write(msp_link.build_msp_request(msp_link.MSP_STATUS_EX))
+            resp = msp_link.read_msp_response(self.ser, timeout=0.15)
+            if resp and resp[0] == msp_link.MSP_STATUS_EX:
+                data = msp_link.parse_msp_status_ex(resp[1])
+                if data:
+                    return data.get("arming_disable_reasons", [])
+        except Exception:
+            pass
+        return []
+
     def get_attitude(self) -> dict[str, float]:
         """Single cheap MSP_ATTITUDE round-trip — used for camera levelling."""
         if not self.is_connected():
@@ -183,7 +205,12 @@ class MSPController(FlightController):
                 status_data = msp_link.parse_msp_status_ex(resp[1])
                 if status_data:
                     telemetry.update(status_data)
-                    self._armed = status_data.get("armed", False)
+                    # Only sync _armed from telemetry when we are NOT trying to hold an arm state.
+                    # If the software wants armed but FC says disarmed, keep _armed=True so
+                    # subsequent send_control() packets keep CH5 high until the FC confirms.
+                    fc_armed = status_data.get("armed", False)
+                    if fc_armed or not self._armed:
+                        self._armed = fc_armed
 
             self.ser.write(msp_link.build_msp_request(msp_link.MSP_ALTITUDE))
             resp = msp_link.read_msp_response(self.ser)

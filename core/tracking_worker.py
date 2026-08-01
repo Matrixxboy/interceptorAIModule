@@ -628,11 +628,17 @@ class TrackingWorkerThread(QThread):
 
                         self.fc.send_control(roll=roll, pitch=pitch, yaw=yaw, throttle=throttle)
                         if self.frame_count % 30 == 0:
+                            arm_flags_str = ""
+                            if self.arm_requested and hasattr(self.fc, "_query_arming_disable_flags"):
+                                reasons = self.fc._query_arming_disable_flags()
+                                if reasons:
+                                    arm_flags_str = f" | DISARM_FLAGS:{'+'.join(reasons)}"
                             self.sys_log.log(
                                 LogCategory.DRONE,
                                 f"RC -> R:{roll} P:{pitch} Y:{yaw} T:{throttle} | "
                                 f"ARM:{'YES' if self.arm_requested else 'NO'} "
-                                f"(gui={self.gui_arm_requested} joy={joy_wants_arm}) | AUX:{channel_overrides}",
+                                f"(gui={self.gui_arm_requested} joy={joy_wants_arm}) | AUX:{channel_overrides}"
+                                + arm_flags_str,
                                 module="FC Link",
                             )
 

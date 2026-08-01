@@ -223,7 +223,7 @@ class SettingsPage(QWidget):
         outer.setSpacing(8)
 
         outer.addWidget(
-            PageHeader("System Settings", "PID · tracking · AUX · camera — compact single view")
+            PageHeader("System Settings", "Control speeds · PID · tracking · AUX · camera")
         )
 
         scroll = QScrollArea()

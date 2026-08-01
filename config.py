@@ -64,8 +64,14 @@ class PredictionConfig:
 class SafetyConfig:
     min_conf_threshold: float = 0.35
     follow_min_confidence: float = 0.60  # Only follow when detection conf ≥ this
-    follow_speed_scale: float = 0.50  # Global gentleness: scales yaw/throttle offsets + slew (0..1)
-    follow_pitch_scale: float = 0.90  # Extra scale for pitch/distance chase (higher = close faster)
+    # Per-axis follow speed (live-tunable). 0 = axis idle, 1 = full configured authority.
+    yaw_speed_scale: float = 0.50
+    pitch_speed_scale: float = 0.90
+    throttle_speed_scale: float = 0.50
+    roll_speed_scale: float = 0.25
+    # Legacy aliases — kept so older presets still load; mirrored onto per-axis scales.
+    follow_speed_scale: float = 0.50
+    follow_pitch_scale: float = 0.90
     max_lost_frames: int = 45
     reacquisition_timeout_s: float = 2.5
     max_yaw_rate: float = 1600.0  # µs/s slew limit
@@ -245,6 +251,17 @@ class SystemConfig:
                         setattr(target, k, v)
 
         update_dataclass(cfg, data)
+        # Older presets only had follow_speed_scale / follow_pitch_scale.
+        safety_data = data.get("safety") if isinstance(data, dict) else None
+        if isinstance(safety_data, dict):
+            if "yaw_speed_scale" not in safety_data and "follow_speed_scale" in safety_data:
+                cfg.safety.yaw_speed_scale = float(safety_data["follow_speed_scale"])
+                cfg.safety.throttle_speed_scale = float(safety_data["follow_speed_scale"])
+            if "pitch_speed_scale" not in safety_data and "follow_pitch_scale" in safety_data:
+                cfg.safety.pitch_speed_scale = float(safety_data["follow_pitch_scale"])
+            # Keep legacy mirrors in sync for any code still reading the old names.
+            cfg.safety.follow_speed_scale = cfg.safety.yaw_speed_scale
+            cfg.safety.follow_pitch_scale = cfg.safety.pitch_speed_scale
         return cfg
 
     def save_json(self, filepath: str | Path) -> None:

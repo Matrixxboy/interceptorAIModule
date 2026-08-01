@@ -275,6 +275,28 @@ QPushButton#btnGhost:hover {
     background-color: #1e2329;
 }
 
+QPushButton#btnStep {
+    min-width: 28px;
+    max-width: 28px;
+    min-height: 28px;
+    max-height: 28px;
+    padding: 0;
+    font-size: 12pt;
+    font-weight: 700;
+    background-color: #1e2329;
+    border: 1px solid #2a3038;
+    color: #c5cad3;
+    border-radius: 4px;
+}
+QPushButton#btnStep:hover {
+    border-color: #4f7cac;
+    color: #ffffff;
+    background-color: #262c34;
+}
+QPushButton#btnStep:pressed {
+    background-color: #171a1f;
+}
+
 /* ===== Inputs — room for text + arrows ===== */
 QSlider::groove:horizontal {
     height: 4px;

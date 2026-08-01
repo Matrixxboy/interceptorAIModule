@@ -198,7 +198,7 @@ class MainWindow(QMainWindow):
         self.telemetry_plots = RealTimeTelemetryPlots()
         self.img_proc_widget = ImageProcessingWidget()
 
-        right_tabs.addTab(self.pid_panel, "PID Tuning")
+        right_tabs.addTab(self.pid_panel, "Control")
         right_tabs.addTab(self.params_panel, "Adjustable Parameters")
         right_tabs.addTab(self.telemetry_plots, "Live Telemetry Charts")
         right_tabs.addTab(self.img_proc_widget, "Image Processing Inspector")
@@ -298,12 +298,13 @@ class MainWindow(QMainWindow):
         self.btn_assist.setText("Disable Assist" if checked else "Enable Assist (Follow)")
 
     def _on_toggle_arm(self, checked: bool) -> None:
-        self.worker.arm_requested = checked
         if checked:
+            self.worker.arm_drone()
             self.btn_arm.setText("DISARM DRONE")
             self.btn_arm.setObjectName("btn_disarm")
             self.btn_arm.setStyle(self.btn_arm.style())
         else:
+            self.worker.disarm_drone()
             self.btn_arm.setText("ARM DRONE")
             self.btn_arm.setObjectName("btn_arm")
             self.btn_arm.setStyle(self.btn_arm.style())

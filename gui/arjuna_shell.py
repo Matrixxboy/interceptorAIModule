@@ -376,13 +376,18 @@ class ArjunaShell(QMainWindow):
             self.worker.reset_lock()
             self.statusBar().showMessage("TRACKER RESET / UNLOCKED (Hotkey R)", 4000)
         elif key == Qt.Key.Key_S or text == "S":
-            # S = check arm status
+            # S = check arm status + FC arming disable flags
             armed = getattr(self.worker, 'arm_requested', False)
             thr = getattr(self.worker, 'throttle_value', 1000)
             mode = getattr(self.worker, 'flight_mode', 'ANGLE')
             fc_status = "CONNECTED" if self.worker.is_connected else "DISCONNECTED"
             msg = f"STATUS CHECK: FC={fc_status} | ARM={'ARMED' if armed else 'DISARMED'} | Mode={mode} | Throttle={thr} µs"
-            self.statusBar().showMessage(msg, 6000)
+            # Query arming-disable flags from FC
+            if self.worker.is_connected and hasattr(self.worker, "fc") and hasattr(self.worker.fc, "_query_arming_disable_flags"):
+                reasons = self.worker.fc._query_arming_disable_flags()
+                if reasons:
+                    msg += f"  ⚠ FC BLOCK: {', '.join(reasons)}"
+            self.statusBar().showMessage(msg, 8000)
             self.sys_log.log(LogCategory.SYSTEM, msg, module="Status Check")
         else:
             super().keyPressEvent(event)

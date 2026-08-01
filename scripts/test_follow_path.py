@@ -29,6 +29,9 @@ def check(name: str, ok: bool, detail: str = "") -> None:
 
 print("\n--- FPV controller produces stick deflection ---")
 cfg = SystemConfig()
+cfg.safety.yaw_speed_scale = 0.50
+cfg.safety.pitch_speed_scale = 0.90
+cfg.safety.throttle_speed_scale = 0.50
 cfg.safety.follow_speed_scale = 0.50
 cfg.camera.mount_pitch_deg = 0.0
 ctl = FPVFollowController(cfg)

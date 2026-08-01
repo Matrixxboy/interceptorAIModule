@@ -34,13 +34,14 @@ class FPVFollowConfig:
     max_roll: float = 120.0
     i_limit: float = 0.45
     d_filter: float = 0.35
-    expo: float = 0.85
+    expo: float = 1.0  # 1.0 = linear after deadzone (smoother proportional stick feel)
     lead_s: float = 0.12
     meas_alpha: float = 0.45
     out_alpha: float = 0.55
     slew_yaw: float = 1600.0
     slew_pitch: float = 1400.0
     slew_roll: float = 600.0
+    slew_throttle: float = 1200.0
     yaw_dir: float = 1.0
     pitch_dir: float = -1.0
     roll_dir: float = 1.0
@@ -182,26 +183,44 @@ class FPVFollowController:
         # altitude_pid controls vertical error ny (climb / descend throttle response)
         alt_res = self.altitude_pid.update(ny, dt, deadzone=c.deadzone_norm, expo=c.expo)
 
-        # Global gentleness scale — yaw / throttle stay mild; pitch has its own scale
-        speed_scale = clamp(float(getattr(self.sys_cfg.safety, "follow_speed_scale", 0.50)), 0.05, 1.0)
-        pitch_scale = clamp(float(getattr(self.sys_cfg.safety, "follow_pitch_scale", 0.90)), 0.05, 1.5)
+        safety = self.sys_cfg.safety
+        # Per-axis speed — live-tunable from the UI; fall back to legacy global scales.
+        yaw_scale = clamp(
+            float(getattr(safety, "yaw_speed_scale", getattr(safety, "follow_speed_scale", 0.50))),
+            0.0,
+            1.5,
+        )
+        pitch_scale = clamp(
+            float(getattr(safety, "pitch_speed_scale", getattr(safety, "follow_pitch_scale", 0.90))),
+            0.0,
+            1.5,
+        )
+        throttle_scale = clamp(
+            float(getattr(safety, "throttle_speed_scale", getattr(safety, "follow_speed_scale", 0.50))),
+            0.0,
+            1.5,
+        )
+        roll_scale = clamp(float(getattr(safety, "roll_speed_scale", 0.25)), 0.0, 1.5)
 
         # Yaw: nx > 0 (target is right) -> yaw right (+offset)
-        yaw_off = c.yaw_dir * yaw_res.output * speed_scale
+        yaw_off = c.yaw_dir * yaw_res.output * yaw_scale
 
         # Pitch: target smaller/farther -> pitch forward, closer -> pitch backward
         raw_pitch = float(dist_est.recommended_pitch_offset) * pitch_scale
         # Respect per-direction caps from safety config
-        fwd_cap = float(getattr(self.sys_cfg.safety, "max_forward_speed", 350.0))
-        back_cap = float(getattr(self.sys_cfg.safety, "max_backward_speed", 250.0))
+        fwd_cap = float(getattr(safety, "max_forward_speed", 350.0))
+        back_cap = float(getattr(safety, "max_backward_speed", 250.0))
         raw_pitch = clamp(raw_pitch, -back_cap, fwd_cap)
         pitch_off = c.pitch_dir * raw_pitch
 
         # Throttle: ny < 0 (target is higher than center) -> increase throttle to climb
         # ny > 0 (target is lower than center) -> decrease throttle to descend
-        throttle_off = -alt_res.output * speed_scale
+        throttle_off = -alt_res.output * throttle_scale
 
+        # Roll reserved for bank-assist; still respects the live speed scale.
         roll_off = 0.0
+        if c.use_roll:
+            roll_off = c.roll_dir * yaw_res.output * c.roll_blend * roll_scale
 
         target_yaw = c.rc_mid + yaw_off
         target_pitch = c.rc_mid + pitch_off
@@ -212,16 +231,19 @@ class FPVFollowController:
             step = rate * dt
             return cur + clamp(tgt - cur, -step, step)
 
-        # Scale slew rates gently — keep a floor so small speed_scale still moves
-        slew_scale = max(0.45, speed_scale)
-        pitch_slew = float(getattr(self.sys_cfg.safety, "max_pitch_rate", 2200.0)) * max(0.55, pitch_scale)
-        self._cmd_yaw = slew(self._cmd_yaw, target_yaw, self.sys_cfg.safety.max_yaw_rate * slew_scale)
+        # Per-axis slew floors keep motion smooth even at low speed scales.
+        yaw_slew = float(getattr(safety, "max_yaw_rate", c.slew_yaw)) * max(0.35, yaw_scale)
+        pitch_slew = float(getattr(safety, "max_pitch_rate", 2200.0)) * max(0.35, pitch_scale)
+        thr_slew = float(getattr(safety, "max_climb_rate", c.slew_throttle)) * max(0.35, throttle_scale)
+        roll_slew = c.slew_roll * max(0.35, roll_scale)
+
+        self._cmd_yaw = slew(self._cmd_yaw, target_yaw, yaw_slew)
         self._cmd_pitch = slew(self._cmd_pitch, target_pitch, pitch_slew)
-        self._cmd_roll = slew(self._cmd_roll, target_roll, c.slew_roll * slew_scale)
+        self._cmd_roll = slew(self._cmd_roll, target_roll, roll_slew)
         self._cmd_throttle = slew(
             getattr(self, "_cmd_throttle", float(base_throttle)),
             target_throttle,
-            1200.0 * slew_scale,
+            thr_slew,
         )
 
         roll = int(clamp(self._cmd_roll, float(c.rc_min), float(c.rc_max)))

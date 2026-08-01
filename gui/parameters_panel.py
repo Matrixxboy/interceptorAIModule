@@ -1,4 +1,4 @@
-"""Compact tracking parameters — single frame, spinboxes only."""
+"""Tracking parameters — distance, aim offsets, and lock confidence."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -23,7 +24,14 @@ from PyQt6.QtWidgets import (
 from config import PRESETS_DIR, SystemConfig
 
 
-def _dspin(value: float, lo: float, hi: float, step: float, decimals: int = 2) -> QDoubleSpinBox:
+def _dspin(
+    value: float,
+    lo: float,
+    hi: float,
+    step: float,
+    decimals: int = 2,
+    tooltip: str = "",
+) -> QDoubleSpinBox:
     sp = QDoubleSpinBox()
     sp.setRange(lo, hi)
     sp.setSingleStep(step)
@@ -32,22 +40,28 @@ def _dspin(value: float, lo: float, hi: float, step: float, decimals: int = 2) -
     sp.setMinimumWidth(100)
     sp.setMaximumWidth(112)
     sp.setAlignment(Qt.AlignmentFlag.AlignRight)
+    if tooltip:
+        sp.setToolTip(tooltip)
     return sp
 
 
-def _ispin(value: int, lo: int, hi: int) -> QSpinBox:
+def _ispin(value: int, lo: int, hi: int, tooltip: str = "") -> QSpinBox:
     sp = QSpinBox()
     sp.setRange(lo, hi)
     sp.setValue(value)
     sp.setMinimumWidth(100)
     sp.setMaximumWidth(112)
     sp.setAlignment(Qt.AlignmentFlag.AlignRight)
+    if tooltip:
+        sp.setToolTip(tooltip)
     return sp
 
 
-def _lbl(text: str) -> QLabel:
+def _lbl(text: str, tooltip: str = "") -> QLabel:
     lab = QLabel(text)
     lab.setObjectName("formLabel")
+    if tooltip:
+        lab.setToolTip(tooltip)
     return lab
 
 
@@ -61,7 +75,17 @@ class ParametersPanel(QWidget):
         self._init_ui()
 
     def _init_ui(self) -> None:
-        root = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        body = QWidget()
+        root = QVBoxLayout(body)
         root.setContentsMargins(4, 4, 4, 4)
         root.setSpacing(8)
 
@@ -84,56 +108,114 @@ class ParametersPanel(QWidget):
         preset_row.addWidget(btn_save)
         root.addLayout(preset_row)
 
-        box = QGroupBox("Tracking Parameters")
-        grid = QGridLayout(box)
-        grid.setContentsMargins(10, 12, 10, 10)
-        grid.setHorizontalSpacing(12)
-        grid.setVerticalSpacing(6)
-
         c = self.sys_config
-        self.sp_desired_dist = _dspin(c.distance.desired_distance_m, 0.5, 50.0, 0.5, 1)
-        self.sp_min_dist = _dspin(c.distance.min_safe_distance_m, 0.2, 20.0, 0.2, 1)
-        self.sp_max_dist = _dspin(c.distance.max_follow_distance_m, 2.0, 100.0, 1.0, 1)
-        self.sp_known_w = _dspin(c.distance.known_object_width_m, 0.01, 10.0, 0.05, 2)
-        self.sp_focal = _dspin(c.distance.focal_length_px, 50.0, 20000.0, 10.0, 1)
-        self.sp_deadzone = _dspin(c.offsets.deadzone_norm, 0.0, 0.2, 0.005, 3)
-        self.sp_horiz_off = _dspin(c.offsets.horizontal_offset_norm, -0.5, 0.5, 0.05, 2)
-        self.sp_vert_off = _dspin(c.offsets.vertical_offset_norm, -0.5, 0.5, 0.05, 2)
-        self.sp_lead = _dspin(c.prediction.lead_time_s, 0.0, 1.0, 0.02, 2)
-        self.sp_conf_thresh = _dspin(c.safety.min_conf_threshold, 0.1, 0.95, 0.05, 2)
-        self.sp_follow_conf = _dspin(c.safety.follow_min_confidence, 0.3, 0.95, 0.05, 2)
-        self.sp_follow_speed = _dspin(c.safety.follow_speed_scale, 0.05, 1.0, 0.05, 2)
-        self.sp_follow_pitch = _dspin(c.safety.follow_pitch_scale, 0.1, 1.5, 0.05, 2)
-        self.sp_max_lost = _ispin(c.safety.max_lost_frames, 5, 200)
+
+        # ---- Distance / follow geometry ----
+        dist_box = QGroupBox("Distance Follow")
+        dist_grid = QGridLayout(dist_box)
+        dist_grid.setContentsMargins(10, 14, 10, 10)
+        dist_grid.setHorizontalSpacing(12)
+        dist_grid.setVerticalSpacing(6)
+
+        self.sp_desired_dist = _dspin(
+            c.distance.desired_distance_m, 0.5, 50.0, 0.5, 1,
+            "Target stand-off distance the pitch loop tries to hold.",
+        )
+        self.sp_min_dist = _dspin(
+            c.distance.min_safe_distance_m, 0.2, 20.0, 0.2, 1,
+            "Minimum safe range — pitch backs off harder below this.",
+        )
+        self.sp_max_dist = _dspin(
+            c.distance.max_follow_distance_m, 2.0, 100.0, 1.0, 1,
+            "Beyond this range, chase authority is limited.",
+        )
+        self.sp_known_w = _dspin(
+            c.distance.known_object_width_m, 0.01, 10.0, 0.05, 2,
+            "Real-world size of the locked object along the calibrated axis.",
+        )
+        self.sp_focal = _dspin(
+            c.distance.focal_length_px, 50.0, 20000.0, 10.0, 1,
+            "Calibrated focal length in pixels (from Distance Calibration).",
+        )
+
+        dist_fields = [
+            (0, 0, "Desired dist (m)", self.sp_desired_dist, self.sp_desired_dist.toolTip()),
+            (0, 2, "Min safe (m)", self.sp_min_dist, self.sp_min_dist.toolTip()),
+            (1, 0, "Max range (m)", self.sp_max_dist, self.sp_max_dist.toolTip()),
+            (1, 2, "Object width (m)", self.sp_known_w, self.sp_known_w.toolTip()),
+            (2, 0, "Focal length (px)", self.sp_focal, self.sp_focal.toolTip()),
+        ]
+        for row, col, text, widget, tip in dist_fields:
+            dist_grid.addWidget(_lbl(text, tip), row, col)
+            dist_grid.addWidget(widget, row, col + 1)
+            widget.valueChanged.connect(self._on_param_change)
+        root.addWidget(dist_box)
+
+        # ---- Aim / lock ----
+        aim_box = QGroupBox("Aim & Lock")
+        aim_grid = QGridLayout(aim_box)
+        aim_grid.setContentsMargins(10, 14, 10, 10)
+        aim_grid.setHorizontalSpacing(12)
+        aim_grid.setVerticalSpacing(6)
+
+        self.sp_deadzone = _dspin(
+            c.offsets.deadzone_norm, 0.0, 0.2, 0.005, 3,
+            "Normalized deadband around center — suppresses jitter near aim.",
+        )
+        self.sp_horiz_off = _dspin(
+            c.offsets.horizontal_offset_norm, -0.5, 0.5, 0.05, 2,
+            "Horizontal aim bias (−1 left … +1 right of frame center).",
+        )
+        self.sp_vert_off = _dspin(
+            c.offsets.vertical_offset_norm, -0.5, 0.5, 0.05, 2,
+            "Vertical aim bias (−1 up … +1 down of frame center).",
+        )
+        self.sp_lead = _dspin(
+            c.prediction.lead_time_s, 0.0, 1.0, 0.02, 2,
+            "Seconds of Kalman lead (prediction). 0 = aim at current box center.",
+        )
+        self.sp_conf_thresh = _dspin(
+            c.safety.min_conf_threshold, 0.1, 0.95, 0.05, 2,
+            "Minimum detection confidence to keep a candidate lock.",
+        )
+        self.sp_follow_conf = _dspin(
+            c.safety.follow_min_confidence, 0.3, 0.95, 0.05, 2,
+            "Confidence required before AI may drive sticks.",
+        )
+        self.sp_max_lost = _ispin(
+            c.safety.max_lost_frames, 5, 200,
+            "Frames without a lock before follow fades to mid-stick.",
+        )
         self.chk_kalman = QCheckBox("Kalman prediction")
         self.chk_kalman.setChecked(c.prediction.enable_kalman)
+        self.chk_kalman.setToolTip("Smooth and predict target motion between detections.")
 
-        fields = [
-            (0, 0, "Desired dist (m)", self.sp_desired_dist),
-            (0, 2, "Min safe (m)", self.sp_min_dist),
-            (1, 0, "Max range (m)", self.sp_max_dist),
-            (1, 2, "Object width (m)", self.sp_known_w),
-            (2, 0, "Focal length (px)", self.sp_focal),
-            (2, 2, "Deadzone", self.sp_deadzone),
-            (3, 0, "Lead time (s)", self.sp_lead),
-            (3, 2, "H offset", self.sp_horiz_off),
-            (4, 0, "V offset", self.sp_vert_off),
-            (4, 2, "Min confidence", self.sp_conf_thresh),
-            (5, 0, "Max lost frames", self.sp_max_lost),
-            (5, 2, "Follow conf ≥", self.sp_follow_conf),
-            (6, 0, "Follow speed", self.sp_follow_speed),
-            (6, 2, "Pitch follow", self.sp_follow_pitch),
+        aim_fields = [
+            (0, 0, "Deadzone", self.sp_deadzone, self.sp_deadzone.toolTip()),
+            (0, 2, "H offset", self.sp_horiz_off, self.sp_horiz_off.toolTip()),
+            (1, 0, "V offset", self.sp_vert_off, self.sp_vert_off.toolTip()),
+            (1, 2, "Lead time (s)", self.sp_lead, self.sp_lead.toolTip()),
+            (2, 0, "Min confidence", self.sp_conf_thresh, self.sp_conf_thresh.toolTip()),
+            (2, 2, "Follow conf ≥", self.sp_follow_conf, self.sp_follow_conf.toolTip()),
+            (3, 0, "Max lost frames", self.sp_max_lost, self.sp_max_lost.toolTip()),
         ]
-        for row, col, text, widget in fields:
-            grid.addWidget(_lbl(text), row, col)
-            grid.addWidget(widget, row, col + 1)
+        for row, col, text, widget, tip in aim_fields:
+            aim_grid.addWidget(_lbl(text, tip), row, col)
+            aim_grid.addWidget(widget, row, col + 1)
             widget.valueChanged.connect(self._on_param_change)
 
         self.chk_kalman.toggled.connect(self._on_param_change)
-        grid.addWidget(self.chk_kalman, 8, 0, 1, 4)
+        aim_grid.addWidget(self.chk_kalman, 4, 0, 1, 4)
+        root.addWidget(aim_box)
 
-        root.addWidget(box)
+        tip = QLabel("Axis speeds live on the Control tab · changes here apply immediately")
+        tip.setStyleSheet("color: #6b7380; font-size: 7.5pt; background: transparent;")
+        tip.setWordWrap(True)
+        root.addWidget(tip)
         root.addStretch(1)
+
+        scroll.setWidget(body)
+        outer.addWidget(scroll)
 
     def _refresh_presets(self) -> None:
         self.combo_presets.clear()
@@ -157,8 +239,6 @@ class ParametersPanel(QWidget):
         self.sys_config.prediction.lead_time_s = self.sp_lead.value()
         self.sys_config.safety.min_conf_threshold = self.sp_conf_thresh.value()
         self.sys_config.safety.follow_min_confidence = self.sp_follow_conf.value()
-        self.sys_config.safety.follow_speed_scale = self.sp_follow_speed.value()
-        self.sys_config.safety.follow_pitch_scale = self.sp_follow_pitch.value()
         self.sys_config.safety.max_lost_frames = self.sp_max_lost.value()
         self.params_updated.emit()
 
@@ -183,8 +263,7 @@ class ParametersPanel(QWidget):
         widgets = [
             self.sp_desired_dist, self.sp_min_dist, self.sp_max_dist, self.sp_known_w,
             self.sp_focal, self.sp_deadzone, self.sp_horiz_off, self.sp_vert_off, self.sp_lead,
-            self.sp_conf_thresh, self.sp_follow_conf, self.sp_follow_speed, self.sp_follow_pitch,
-            self.sp_max_lost, self.chk_kalman,
+            self.sp_conf_thresh, self.sp_follow_conf, self.sp_max_lost, self.chk_kalman,
         ]
         for w in widgets:
             w.blockSignals(True)
@@ -200,8 +279,6 @@ class ParametersPanel(QWidget):
         self.sp_lead.setValue(cfg.prediction.lead_time_s)
         self.sp_conf_thresh.setValue(cfg.safety.min_conf_threshold)
         self.sp_follow_conf.setValue(cfg.safety.follow_min_confidence)
-        self.sp_follow_speed.setValue(cfg.safety.follow_speed_scale)
-        self.sp_follow_pitch.setValue(cfg.safety.follow_pitch_scale)
         self.sp_max_lost.setValue(cfg.safety.max_lost_frames)
         for w in widgets:
             w.blockSignals(False)
