@@ -390,7 +390,7 @@ def main() -> int:
         cfg.distance.focal_length_px = (fw * 0.5) / math.tan(math.radians(max(10.0, cfg.camera.fov_h_deg) * 0.5))
         print(f" No calib yet — FOV estimate focal={cfg.distance.focal_length_px:.0f}px. Press C after lock.")
 
-    win = "Arjuna Accurate Distance Lock"
+    win = "T.R.I.V.E.N.I Accurate Distance Lock"
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(win, 1100, 820)
     drag = RoiDrag()

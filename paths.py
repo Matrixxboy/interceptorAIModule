@@ -1,4 +1,4 @@
-"""Central paths definition for Arjuna GCS and PyInstaller bundle compatibility."""
+"""Central paths definition for T.R.I.V.E.N.I and PyInstaller bundle compatibility."""
 
 from __future__ import annotations
 
@@ -20,11 +20,11 @@ ROOT = BUNDLE_DIR
 if sys.platform == "win32":
     appdata_env = os.environ.get("APPDATA")
     if appdata_env:
-        APP_DATA_DIR = Path(appdata_env) / "ArjunaGCS"
+        APP_DATA_DIR = Path(appdata_env) / "T.R.I.V.E.N.I"
     else:
-        APP_DATA_DIR = Path.home() / "AppData" / "Roaming" / "ArjunaGCS"
+        APP_DATA_DIR = Path.home() / "AppData" / "Roaming" / "T.R.I.V.E.N.I"
 else:
-    APP_DATA_DIR = Path.home() / ".config" / "ArjunaGCS"
+    APP_DATA_DIR = Path.home() / ".config" / "T.R.I.V.E.N.I"
 
 # Writable application paths for persistent state
 PRESETS_DIR = APP_DATA_DIR / "presets"
@@ -35,8 +35,8 @@ PLUGINS_DIR = APP_DATA_DIR / "plugins"
 
 # Read-only bundled asset paths
 MODELS_DIR = BUNDLE_DIR / "models"
-CALIBRATION_FILE = APP_DATA_DIR / "calibration.json"
-DEFAULT_CALIBRATION_FILE = BUNDLE_DIR / "calibration.json"
+CONFIG_FILE = APP_DATA_DIR / "config.json"
+DEFAULT_CONFIG_FILE = BUNDLE_DIR / "config.json"
 
 # Ensure all writable directories exist
 for _dir in (APP_DATA_DIR, PRESETS_DIR, LOGS_DIR, DATA_DIR, CONFIGS_DIR, PLUGINS_DIR):

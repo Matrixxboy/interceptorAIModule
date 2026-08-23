@@ -112,10 +112,10 @@ class CameraConfig:
 @dataclass
 class DetectionConfig:
     mode: DetectionMode = "coco"
-    model_name: str = "yolov8n.pt"
-    model_path: Path = field(default_factory=lambda: MODELS_DIR / "yolov8n.pt")
+    model_name: str = "yolov8n.onnx"
+    model_path: Path = field(default_factory=lambda: MODELS_DIR / "yolov8n.onnx")
     custom_weights: Path = field(
-        default_factory=lambda: MODELS_DIR / "drone_missile_best.pt"
+        default_factory=lambda: MODELS_DIR / "drone_missile_best.onnx"
     )
     imgsz: int = 640
     conf_threshold: float = 0.25
@@ -145,12 +145,6 @@ class TrackerConfig:
 
 
 @dataclass
-class DeviceConfig:
-    theme: str = "dark"
-    ui_scale: float = 1.0
-
-
-@dataclass
 class AuxChannelsConfig:
     arm_channel: int = 4
     mode_channel: int = 5
@@ -161,38 +155,29 @@ class AuxChannelsConfig:
 
 
 @dataclass
-class JoystickChannelConfig:
-    name: str = ""
-    axis: int = -1
-    is_button: bool = False
-    inverted: bool = False
-    min_val: int = 1000
-    center_val: int = 1500
-    max_val: int = 2000
-    # MSP / INAV RC channel index (0-based). CH5=4 (AUX1), CH6=5 (AUX2), …
-    rc_channel: int = -1
-
-
-@dataclass
-class JoystickConfig:
-    enabled: bool = False
-    device_name: str = ""
-    deadzone: float = 0.05
-    roll: JoystickChannelConfig = field(default_factory=lambda: JoystickChannelConfig(name="Roll", axis=0))
-    pitch: JoystickChannelConfig = field(default_factory=lambda: JoystickChannelConfig(name="Pitch", axis=1, inverted=False))
-    throttle: JoystickChannelConfig = field(default_factory=lambda: JoystickChannelConfig(name="Throttle", axis=2))
-    yaw: JoystickChannelConfig = field(default_factory=lambda: JoystickChannelConfig(name="Yaw", axis=3))
-
-    aux_channels: list[JoystickChannelConfig] = field(default_factory=lambda: [
-        JoystickChannelConfig(
-            name="Arm", axis=0, is_button=True, rc_channel=4,
-            min_val=1000, center_val=1000, max_val=1800,
-        ),
-        JoystickChannelConfig(
-            name="Flight Mode", axis=1, is_button=True, rc_channel=5,
-            min_val=1000, center_val=1000, max_val=1900,
-        ),
-    ])
+class RCControlConfig:
+    # Axis channel mappings (Defaults to AETR: 0, 1, 2, 3)
+    roll_channel: int = 0
+    pitch_channel: int = 1
+    throttle_channel: int = 2
+    yaw_channel: int = 3
+    
+    # AUX switch mappings
+    lock_channel: int = 6  # 0-based CH7 (AUX3)
+    follow_channel: int = 5  # 0-based CH6 (AUX2)
+    lock_threshold: int = 1700
+    follow_threshold: int = 1700
+    
+    # Channel Calibrations
+    rc_mid: int = 1500
+    rc_min: int = 1000
+    rc_max: int = 2000
+    expo: float = 0.85
+    yaw_dir: float = 1.0
+    pitch_dir: float = -1.0
+    roll_dir: float = 1.0
+    use_roll: bool = False
+    roll_blend: float = 0.25
 
 
 @dataclass
@@ -207,9 +192,8 @@ class SystemConfig:
     safety: SafetyConfig = field(default_factory=SafetyConfig)
     offsets: OffsetsConfig = field(default_factory=OffsetsConfig)
     camera: CameraConfig = field(default_factory=CameraConfig)
-    device: DeviceConfig = field(default_factory=DeviceConfig)
     aux_channels: AuxChannelsConfig = field(default_factory=AuxChannelsConfig)
-    joystick: JoystickConfig = field(default_factory=JoystickConfig)
+    rc_control: RCControlConfig = field(default_factory=RCControlConfig)
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -235,16 +219,6 @@ class SystemConfig:
                     curr = getattr(target, k)
                     if isinstance(v, dict) and hasattr(curr, "__dataclass_fields__"):
                         update_dataclass(curr, v)
-                    elif isinstance(v, list) and k == "aux_channels":
-                        parsed_list = []
-                        for item in v:
-                            if isinstance(item, dict):
-                                ch = JoystickChannelConfig()
-                                update_dataclass(ch, item)
-                                parsed_list.append(ch)
-                            else:
-                                parsed_list.append(item)
-                        setattr(target, k, parsed_list)
                     elif isinstance(curr, Path):
                         setattr(target, k, Path(v))
                     else:

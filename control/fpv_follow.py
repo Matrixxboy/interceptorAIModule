@@ -66,6 +66,15 @@ class FPVFollowController:
             max_pitch=self.sys_cfg.altitude_pid.max_output,
             deadzone_norm=self.sys_cfg.offsets.deadzone_norm,
             lead_s=self.sys_cfg.prediction.lead_time_s,
+            rc_mid=self.sys_cfg.rc_control.rc_mid,
+            rc_min=self.sys_cfg.rc_control.rc_min,
+            rc_max=self.sys_cfg.rc_control.rc_max,
+            expo=self.sys_cfg.rc_control.expo,
+            yaw_dir=self.sys_cfg.rc_control.yaw_dir,
+            pitch_dir=self.sys_cfg.rc_control.pitch_dir,
+            roll_dir=self.sys_cfg.rc_control.roll_dir,
+            use_roll=self.sys_cfg.rc_control.use_roll,
+            roll_blend=self.sys_cfg.rc_control.roll_blend,
         )
 
         self.yaw_pid = PIDController(self.sys_cfg.yaw_pid)
@@ -87,6 +96,15 @@ class FPVFollowController:
         self.motion_predictor.update_config(sys_cfg.prediction)
         self.cfg.deadzone_norm = sys_cfg.offsets.deadzone_norm
         self.cfg.lead_s = sys_cfg.prediction.lead_time_s
+        self.cfg.rc_mid = sys_cfg.rc_control.rc_mid
+        self.cfg.rc_min = sys_cfg.rc_control.rc_min
+        self.cfg.rc_max = sys_cfg.rc_control.rc_max
+        self.cfg.expo = sys_cfg.rc_control.expo
+        self.cfg.yaw_dir = sys_cfg.rc_control.yaw_dir
+        self.cfg.pitch_dir = sys_cfg.rc_control.pitch_dir
+        self.cfg.roll_dir = sys_cfg.rc_control.roll_dir
+        self.cfg.use_roll = sys_cfg.rc_control.use_roll
+        self.cfg.roll_blend = sys_cfg.rc_control.roll_blend
 
     def reset(self) -> None:
         c = self.cfg

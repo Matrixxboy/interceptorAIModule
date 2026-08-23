@@ -1,0 +1,158 @@
+{
+  "detection": {
+    "mode": "coco",
+    "model_name": "yolov8n.pt",
+    "model_path": "C:\\Users\\matrixboy\\OneDrive\\Desktop\\inercepterAI\\models\\yolov8n.pt",
+    "custom_weights": "C:\\Users\\matrixboy\\OneDrive\\Desktop\\inercepterAI\\models\\drone_missile_best.pt",
+    "imgsz": 640,
+    "conf_threshold": 0.25,
+    "iou_threshold": 0.45,
+    "max_det": 20,
+    "world_classes": [
+      "drone",
+      "quadcopter",
+      "UAV",
+      "FPV drone",
+      "missile",
+      "cruise missile",
+      "rocket",
+      "projectile",
+      "aircraft",
+      "helicopter"
+    ],
+    "class_filter": [
+      0,
+      4,
+      14,
+      32,
+      33
+    ],
+    "min_box_area_frac": 5e-05,
+    "max_box_area_frac": 0.35,
+    "device": "auto",
+    "half": true,
+    "detect_every_n": 3,
+    "augment": false
+  },
+  "tracker": {
+    "backend": "bytetrack",
+    "max_age": 45,
+    "min_hits": 2,
+    "iou_match_threshold": 0.25,
+    "lock_tracker": "none",
+    "reacquire_iou": 0.12,
+    "reacquire_max_frames": 90,
+    "enable_template_fallback": true,
+    "template_match_threshold": 0.45
+  },
+  "yaw_pid": {
+    "kp": 340,
+    "ki": 45,
+    "kd": 60,
+    "max_output": 400,
+    "i_limit": 0.45,
+    "d_filter": 0.35
+  },
+  "altitude_pid": {
+    "kp": 310,
+    "ki": 40,
+    "kd": 55,
+    "max_output": 360,
+    "i_limit": 0.45,
+    "d_filter": 0.35
+  },
+  "position_pid": {
+    "kp": 150,
+    "ki": 20,
+    "kd": 30,
+    "max_output": 200,
+    "i_limit": 0.45,
+    "d_filter": 0.35
+  },
+  "distance": {
+    "focal_length_px": 800,
+    "known_object_width_m": 0.3,
+    "size_axis": "max",
+    "desired_distance_m": 5,
+    "min_safe_distance_m": 2,
+    "max_follow_distance_m": 25,
+    "kp": 180,
+    "ki": 18,
+    "kd": 30,
+    "max_pitch_offset": 320
+  },
+  "prediction": {
+    "enable_kalman": true,
+    "process_noise_q": 0.01,
+    "measurement_noise_r": 0.1,
+    "lead_time_s": 0.12,
+    "smoothing_factor": 0.45
+  },
+  "safety": {
+    "min_conf_threshold": 0.35,
+    "follow_min_confidence": 0.6,
+    "yaw_speed_scale": 0.5,
+    "pitch_speed_scale": 0.9,
+    "throttle_speed_scale": 0.5,
+    "roll_speed_scale": 0.25,
+    "follow_speed_scale": 0.5,
+    "follow_pitch_scale": 0.9,
+    "max_lost_frames": 45,
+    "reacquisition_timeout_s": 2.5,
+    "max_yaw_rate": 1600,
+    "max_climb_rate": 1400,
+    "max_descent_rate": 1200,
+    "max_pitch_rate": 2200,
+    "max_forward_speed": 350,
+    "max_backward_speed": 250,
+    "max_acceleration": 1800
+  },
+  "offsets": {
+    "horizontal_offset_norm": 0,
+    "vertical_offset_norm": 0,
+    "deadzone_norm": 0.02,
+    "deadzone_bleed": 0.15
+  },
+  "camera": {
+    "fov_h_deg": 90,
+    "fov_v_deg": 60,
+    "frame_width": 1280,
+    "frame_height": 720,
+    "camera_index": 1,
+    "target_fps": 60,
+    "mount_pitch_deg": 0,
+    "mount_roll_deg": 0,
+    "mount_yaw_deg": 0,
+    "stabilize_with_attitude": false,
+    "vertical_ref": "level",
+    "desired_elevation_deg": 0,
+    "use_calibrated_focal": true
+  },
+  "aux_channels": {
+    "arm_channel": 4,
+    "mode_channel": 5,
+    "arm_high": 1800,
+    "arm_low": 1000,
+    "mode_high": 1900,
+    "mode_low": 1000
+  },
+  "rc_control": {
+    "roll_channel": 0,
+    "pitch_channel": 1,
+    "throttle_channel": 2,
+    "yaw_channel": 3,
+    "lock_channel": 6,
+    "follow_channel": 5,
+    "lock_threshold": 1700,
+    "follow_threshold": 1700,
+    "rc_mid": 1500,
+    "rc_min": 1000,
+    "rc_max": 2000,
+    "expo": 0.85,
+    "yaw_dir": 1,
+    "pitch_dir": -1,
+    "roll_dir": 1,
+    "use_roll": false,
+    "roll_blend": 0.25
+  }
+}

@@ -79,7 +79,7 @@ class SystemLogger:
         self.max_buffer = max_buffer
         self.buffer: deque[LogEntry] = deque(maxlen=max_buffer)
         self._subscribers: list[Callable[[LogEntry], None]] = []
-        self._py_logger = logging.getLogger("arjuna")
+        self._py_logger = logging.getLogger("triveni")
         if not self._py_logger.handlers:
             handler = logging.StreamHandler()
             handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
@@ -98,7 +98,7 @@ class SystemLogger:
         category: LogCategory,
         message: str,
         severity: LogSeverity = LogSeverity.INFO,
-        module: str = "Arjuna",
+        module: str = "triveni",
         target_id: str = "",
         fps: float = 0.0,
         latency_ms: float = 0.0,

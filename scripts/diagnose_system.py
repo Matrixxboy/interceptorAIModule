@@ -69,7 +69,7 @@ for path in (
 ):
     report(str(path.relative_to(ROOT)), f"{path.stat().st_size / 1_048_576:.1f} MB" if path.is_file() else "MISSING")
 
-section("Arjuna detector")
+section("T.R.I.V.E.N.I detector")
 try:
     from config import SystemConfig
     from detection.yolo_detector import YOLODetector

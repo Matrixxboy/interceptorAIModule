@@ -1,12 +1,16 @@
-# FPV Interceptor AI — Visual Lock & Follow Guide
+# Vision-Guided Autonomous Drone Companion System
 
-PC vision lock for an **INAV FPV drone**: camera tracks a target, then MSP `SET_RAW_RC` steers **yaw + pitch** to keep it centered (ANGLE mode recommended).
+PC vision lock for an **INAV/ArduPilot FPV drone**: camera tracks a target, then visual servoing steers **yaw + pitch** to keep it centered. The system is currently implemented as a Python-based PC prototype, with a detailed hardware and software specification targeting a production-grade Jetson Orin Nano + STM32 embedded system.
 
 > **Safety:** Bench with **props off** first. This sends real RC channel values to the flight controller.
 
 ---
 
-## 1. What it does
+## 1. Current Prototype (PC / Python)
+
+The current implementation is a PC-based prototype that communicates with the flight controller via MSP over USB/Serial.
+
+### What it does
 
 | Stage | Behavior |
 |--------|----------|
@@ -15,45 +19,7 @@ PC vision lock for an **INAV FPV drone**: camera tracks a target, then MSP `SET_
 | **Follow** | FPV visual servo → yaw & pitch sticks toward target center |
 | **FC** | Continuous MSP AETR + ARM (CH5) + flight mode (CH6) |
 
-```
-Camera → YOLO/CSRT lock → pixel error → FPVFollowController
-                                              ↓
-                                    MSP_SET_RAW_RC @ 50 Hz
-                                              ↓
-                                         INAV FC (ANGLE)
-```
-
----
-
-## 2. Project layout (cleaned)
-
-```
-inercepterAI/
-├── main.py                      # Entry point — MSP lock + follow
-├── calibration_fpv.py           # GUI calibrator (save → calibration.json)
-├── calibration.json             # Saved camera / follow values
-├── config.py                    # YOLO / tracker defaults
-├── requirements.txt
-├── yolov8n.pt                   # Default COCO weights (auto-used)
-├── control/
-│   └── fpv_follow.py            # Yaw/pitch aim PID + lead
-├── detection/
-│   ├── yolo_detector.py         # Ultralytics YOLO wrapper
-│   └── hybrid_tracker.py        # YOLO + OpenCV CSRT/KCF hybrid
-├── utils/
-│   ├── calib_io.py              # Load / save calibration.json
-│   ├── helpers.py
-│   └── logger.py
-├── models/
-├── datasets/drone_missile/
-└── scripts/train_drone_missile.py
-```
-
----
-
-## 3. Hardware & INAV setup
-
-### Required
+### Hardware & INAV setup
 
 | Item | Notes |
 |------|--------|
@@ -62,25 +28,13 @@ inercepterAI/
 | USB–serial link | e.g. FTDI / onboard USB VCP → `COMx` |
 | Channel map | **AETR** (default in `main.py`) |
 
-### INAV Modes tab (typical)
-
+#### INAV Modes tab (typical)
 | Mode | Channel | Range |
 |------|---------|--------|
 | **ARM** | CH5 / AUX1 | high ≈ 1800 |
-| **ANGLE** (or HORIZON) | CH6 / AUX2 | high ≈ 1900 |
+| **ANGLE** | CH6 / AUX2 | high ≈ 1900 |
 
-MSP receiver / override must accept `MSP_SET_RAW_RC` from the PC link you use.
-
-### Wire check
-
-1. Connect FC USB (or UART↔USB) → note COM port in Device Manager  
-2. Set `CONTROL_PORT` in `main.py` (default `"COM5"`)  
-3. Set `CONTROL_BAUD` to match the MSP UART (often `57600` or `115200`)  
-4. Set `CAMERA_INDEX` (`0`, `1`, …) until the preview is correct  
-
----
-
-## 4. Install
+### Install
 
 ```bash
 cd inercepterAI
@@ -92,213 +46,139 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-### Optional: CUDA (much faster YOLO)
-
+*(Optional)* For CUDA (much faster YOLO):
 ```bash
 pip uninstall -y torch torchvision
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
-python -c "import torch; print(torch.cuda.is_available())"
 ```
 
-CPU works; use `YOLO_EVERY_N = 4`–`6` in `main.py` if FPS drops.
+### Run
 
----
-
-## 5. Run
-
-### Calibrate first (recommended)
-
+#### Calibrate first (recommended, Props off!)
 ```bash
 python calibration_fpv.py
 ```
+1. Connect FC → set COM port → ANGLE ON.
+2. Hold Yaw LEFT/RIGHT and Pitch UP/DOWN — craft should move that way.
+3. Open camera → drag-lock a target.
+4. Enable LIVE FOLLOW. If it turns the wrong way, flip Yaw / Pitch.
+5. Save JSON → `calibration.json`.
 
-**Props off.** Workflow:
-
-1. **Connect FC** → set COM port → **ANGLE ON**  
-2. **Hold** Yaw LEFT/RIGHT and Pitch UP/DOWN — craft should move that way (meters + FC)  
-3. **Open camera** → drag-lock a target  
-4. Enable **LIVE FOLLOW** — craft should aim at the box  
-5. If it turns the **wrong** way → **Flip Yaw** / **Flip Pitch**  
-6. Tune Kp / max with **+ / −**  
-7. **Save JSON** → `calibration.json` (auto-loaded by `main.py`)
-
-Hold-to-move buttons send real MSP sticks. Live follow sends the same yaw/pitch the flight code will use.
-
-### Fly / bench follow
-
+#### Fly / Bench Follow
 ```bash
 python main.py
 ```
 
----
-
-## 6. Controls
+### Controls
 
 | Key | Action |
 |-----|--------|
-| **L** | Start lock selection — drag a box on the target, release |
-| **Y** | YOLO auto-lock highest-confidence detection |
-| **E** | Enable follow assist |
-| **D** | Disable follow assist |
-| **A** | Arm CH5 + flight mode CH6 ON |
-| **X** | Disarm + mode OFF, throttle → 1000 |
-| **M** | Toggle flight mode CH6 only |
-| **0** | Force CH6 = 1900 (mode ON) |
-| **U** / **J** | Throttle +25 / −25 |
-| **R** | Clear lock / tracker |
-| **S** | Query FC arm status (MSP_STATUS) |
-| **Q** | Quit (disarms safely) |
-
-### Bench procedure (props off)
-
-1. `python main.py`  
-2. Confirm HUD shows RC values updating  
-3. Press **0** or **M** → CH6 high (ANGLE)  
-4. **L** → drag box on subject (or **Y** if YOLO sees it)  
-5. Assist usually enables on lock — watch ERR X/Y and yaw/pitch move toward center  
-6. **A** only when you intentionally test armed behavior (props off)  
-7. **X** then **Q** to exit  
+| **L** | Start lock selection (drag box) |
+| **Y** | YOLO auto-lock |
+| **E** / **D** | Enable / Disable follow assist |
+| **A** / **X** | Arm (CH5) + Mode ON / Disarm + Mode OFF |
+| **M** | Toggle flight mode CH6 |
+| **0** | Force CH6 = 1900 |
+| **Q** | Quit |
 
 ---
 
-## 7. How following works (FPV)
+## 2. Production-Grade Embedded System Architecture & Technical Specification
 
-File: `control/fpv_follow.py`
+> [!NOTE]
+> **Target Platform:** NVIDIA Jetson Orin Nano (8GB) + STM32H753 MCU  
+> **Primary AI Core:** YOLOv8-Nano TensorRT INT8 (>60 FPS) | **Control Frequency:** 8 kHz Inner Loop / 400 Hz EKF3 / 50 Hz SBC Setpoint Stream
 
-| Axis | Image error | Stick |
-|------|-------------|--------|
-| **Yaw** | Target left/right of center | Turn to face target |
-| **Pitch** | Target above/below center | Nose toward target |
-| **Roll** | Off by default | Optional light strafe (`use_roll=True`) |
+This section specifies the end-to-end embedded software and hardware architecture for the production version of the system. Designed as a high-performance, modular, and fail-safe hardware extension, this system mounts onto multirotor platforms to provide real-time target tracking, optical distance estimation, autonomous velocity setpoint generation, and immediate pilot override capability.
 
-Extras for accuracy:
+The system features a dual-processor heterogeneity model:
+1. **Companion Computer (High-Level AI/Vision Core):** NVIDIA Jetson Orin Nano running real-time target detection (YOLOv8-Nano TensorRT INT8), visual object tracking (ByteTrack), monocular distance estimation, and kinematic PID vector computation.
+2. **Flight Controller Core (Real-Time Safety/Control Core):** STM32H753 running ArduPilot/PX4 RTOS, handling sensor fusion (EKF3), attitude control loops, motor PWM output, manual RC receiver decoding, and hardware-level override arbitration.
 
-- Normalized error (works at any resolution)  
-- Soft deadzone + expo (precise near center, stronger when far)  
-- Lead from image-plane velocity  
-- Filtered D-term + slew limits (smooth sticks)  
+> [!IMPORTANT]
+> **Safety Guarantees**: Direct manual RC stick deflection (>10%) or heartbeat loss (>500 ms) automatically revokes autonomous authority, falling back to manual angle control or auto-hover.
 
-Tune in `main.py` → `FPV_CFG`:
+### System Architecture Diagram
 
-```python
-FPV_CFG = FPVFollowConfig(
-    yaw_kp=340.0,
-    pitch_kp=310.0,
-    max_yaw=400.0,
-    max_pitch=360.0,
-    lead_s=0.14,
-    yaw_dir=1.0,      # flip to -1.0 if left/right inverted
-    pitch_dir=-1.0,   # flip to 1.0 if up/down inverted
-    use_roll=False,
-)
+```mermaid
+flowchart TB
+    subgraph Power ["POWER DISTRIBUTION & ISOLATION"]
+        Battery["4S-6S LiPo Battery\n(14.8V - 25.2V)"] --> PDB["Main PDB / Current Sensor\n(Volt / Amp Telemetry)"]
+        PDB --> BEC["Dual Buck Regulator (BEC)\n5.1V @ 5A (FC) | 9.0V @ 3A (SBC/CAM)"]
+    end
+
+    subgraph Ground ["PILOT & GROUND CONTROLS"]
+        Transmitter["Pilot Transmitter\n(ExpressLRS / CRSF 2.4GHz)"]
+    end
+
+    subgraph SBC ["COMPANION COMPUTER (NVIDIA Jetson Orin Nano)"]
+        direction TB
+        Camera["Sony IMX477 CSI Cam\n(4-Lane MIPI CSI-2)"] --> Preproc["Image Acquisition & Preprocessing\n(V4L2 DMA / NVMM / CUDA Zero-Copy)"]
+        Preproc --> VisionEngine["Inference & Computer Vision\n(YOLOv8 INT8 TensorRT + ByteTrack)"]
+        VisionEngine --> SetpointGen["Kinematic PID Setpoint Generator\n(3D Error Vector -> Velocity Cmds)"]
+        SetpointGen --> MAVLinkDaemon["MAVLink Comms Engine\n(cStandard v2.0 / UART DMA)"]
+        MAVLinkDaemon --> SBCDiag["Diagnostics & Watchdog Supervisor"]
+    end
+
+    subgraph FC ["FLIGHT CONTROLLER (STM32H753 MCU @ 480MHz)"]
+        direction TB
+        HAL["Hardware Abstraction Layer (HAL / ChibiOS)\n(DMA SPI / I2C / UART Drivers)"] --> Sensors["Core Sensors Suite\n(ICM-42688-P Dual IMUs, DPS310 Baro, M10 GPS)"]
+        Sensors --> EKF["EKF3 Navigation Filter\n(24-State Vector Estimator @ 400Hz)"]
+        EKF --> Arbitrator["Mode Switch & Safety Arbitrator\n(Offboard vs Manual Override)"]
+        Arbitrator --> Mixer["Actuator Controller & PWM Mixer\n(DShot600 Digital ESC Driver)"]
+    end
+
+    BEC --> SBC
+    BEC --> FC
+    Transmitter -- "CRSF Protocol\n(Manual Sticks / AUX Switches)" --> FC
+    MAVLinkDaemon -- "MAVLink v2.0 UART2\n(921,600 Baud)" --> Arbitrator
+    Mixer --> Motors["4x Brushless Motors / ESCs"]
 ```
 
-| Symptom | Try |
-|---------|-----|
-| Turns the wrong way | Flip `yaw_dir` |
-| Pitches the wrong way | Flip `pitch_dir` |
-| Slow to catch target | Raise `yaw_kp` / `pitch_kp` or `max_yaw` / `max_pitch` |
-| Oscillates around center | Lower Kp, raise `deadzone_norm`, or lower `lead_s` |
-| Jerky sticks | Lower `out_alpha`, raise slew values slightly |
+### System Workflow
 
----
+1. **Image Capture:** 60 FPS MIPI CSI-2 Raw Bayer Stream directly into zero-copy memory.
+2. **Target Inference:** INT8 Accelerated YOLOv8 TensorRT engine (< 10 ms execution).
+3. **Distance Estimation:** Pin-hole camera model projection & optical expansion calculation.
+4. **Kinematic PID Loop:** Translates visual displacement to 3D velocity setpoints at 50 Hz.
+5. **MAVLink Serialization:** Encodes MAVLink Packets over UART.
+6. **FC Command Ingestion:** Real-time decoding and validation on the STM32.
+7. **Safety Arbitration:** Evaluates manual override vs autonomous mode (400 Hz Loop).
+8. **Motor Execution:** Translates to DShot600 digital motor commands (8 kHz loop).
 
-## 8. How tracking works
+### Software Architecture
 
-File: `detection/hybrid_tracker.py`
+```mermaid
+flowchart TB
+    subgraph JetsonOS ["COMPANION COMPUTER FIRMWARE (Jetson Linux OS)"]
+        direction TB
+        AppLayer["Application Layer: Guidance & Tracking Daemon (C++17 Threaded)\n- Vision Processing Node  |  - Target Tracking Node\n- Kinematic PID Engine     |  - MAVLink Daemon"]
+        IPC1["POSIX Shared Memory / Zero-Copy Ring Buffers"]
+        HAL_SBC["Hardware Abstraction & Acceleration Layer\n- Jetson Multimedia API (V4L2 ISP)  |  - TensorRT 8.x C++ API\n- Linux TTY Serial DMA Driver"]
+        AppLayer --> IPC1 --> HAL_SBC
+    end
 
-1. Lock from ROI or YOLO box  
-2. **CSRT** (or KCF) tracks every frame  
-3. Every `YOLO_EVERY_N` frames, YOLO re-detects and snaps back by IoU / nearest center  
-4. If OpenCV loses the target, YOLO reacquire runs until `MAX_LOST_FRAMES`
+    JetsonOS -- "Serial MAVLink Stream (921,600 Baud)" --> FCOS
 
-In `main.py`:
-
-```python
-USE_YOLO = True
-YOLO_EVERY_N = 4
-TRACKER_TYPE = "CSRT"   # or "KCF" for more speed
+    subgraph FCOS ["FLIGHT CONTROLLER FIRMWARE (ArduPilot / PX4 RTOS)"]
+        direction TB
+        ModeManager["Flight Application & Mode Controller\n- GUIDED / OFFBOARD Flight Mode Manager\n- Safety & Manual Override Arbitrator"]
+        IPC2["Inter-Task IPC / RTOS Queues"]
+        NavLayer["Core Navigation & Estimation Layer\n- EKF3 Navigation Filter (24-State)  |  - Rate / Att / Pos PID Loops\n- Motor Mixer"]
+        HAL_FC["RTOS & Hardware Abstraction Layer (ChibiOS Kernel)\n- Hardware Interrupts (NVIC)  |  - SPI/I2C/UART DMA Drivers\n- Hardware Watchdog Driver"]
+        ModeManager --> IPC2 --> NavLayer --> HAL_FC
+    end
 ```
 
-Detection defaults live in `config.py` (`DetectionConfig`):
+### Safety & Error Handling
 
-| Mode | When to use |
-|------|-------------|
-| `"coco"` (default) | Works out of the box with `yolov8n.pt` |
-| `"world"` | Open-vocab prompts (`drone`, `UAV`, …) — needs YOLO-World weights |
-| `"custom"` | After training `models/drone_missile_best.pt` |
+- **Target Loss / Occlusion:** ByteTrack Kalman Filter predicts location based on velocity vector for 500ms before falling back to hover.
+- **Process Freeze / Software Crash:** FC MAVLink Heartbeat timeout counter (> 500 ms) revokes autonomous control and reverts to Pilot Manual Angle Mode.
+- **Telemetry UART Disconnect:** CRC-16 Checksum failures trigger drop of invalid frames; prolonged failures trigger manual fallback.
 
----
+### Future Scalability
 
-## 9. Optional: train a drone detector
-
-1. Label images (Ultralytics layout) under `datasets/drone_missile/`  
-2. Copy `data.yaml.example` → `data.yaml` and set class names  
-3. Train:
-
-```bash
-python scripts/train_drone_missile.py
-```
-
-4. Set in `config.py`:
-
-```python
-mode: DetectionMode = "custom"
-```
-
----
-
-## 10. Key settings cheatsheet (`main.py`)
-
-| Setting | Meaning |
-|---------|---------|
-| `CONTROL_PORT` | FC serial port |
-| `CONTROL_BAUD` | MSP baud |
-| `CAMERA_INDEX` | OpenCV camera index |
-| `FRAME_WIDTH` / `HEIGHT` | Capture size |
-| `ARM_CH` / `MODE_CH` | 0-based indices (CH5=4, CH6=5) |
-| `MODE_ON_VALUE` | 1900 for ANGLE range |
-| `SEND_HZ` | MSP send rate (default 50) |
-| `USE_YOLO` | Hybrid refresh on/off |
-| `FPV_CFG` | Follow gains / directions |
-
----
-
-## 11. Troubleshooting
-
-| Problem | Fix |
-|---------|-----|
-| `Could not open COMx` | Wrong port; unplug other serial tools; check baud |
-| Camera black / wrong feed | Change `CAMERA_INDEX`; close other apps using the cam |
-| YOLO load fails | `pip install ultralytics torch`; keep `yolov8n.pt` in project root |
-| Window freezes / “Not responding” | Run `.venv\Scripts\python.exe main.py --safe-mode`, then `scripts\diagnose_system.py` |
-| RTX GPU is ignored | Diagnostic must show a CUDA build and `CUDA available True`; reinstall PyTorch from its CUDA index. Python 3.11/3.12 has the broadest Windows CUDA wheel support. |
-| Native crash without traceback | Check `%APPDATA%\ArjunaGCS\logs\native_crash.log` and `crash.log` |
-| Low FPS | Raise `YOLO_EVERY_N`, use `TRACKER_TYPE = "KCF"`, install CUDA torch |
-| Tracks but does not follow | Press **E**; confirm ASSIST ON; check ANGLE on CH6 |
-| Follows opposite direction | Flip `yaw_dir` / `pitch_dir` in `FPV_CFG` |
-| FC ignores MSP | Enable MSP on that UART; check INAV “Receiver” / MSP override |
-| Arm fails | Throttle low, ANGLE on, arm switch range matches INAV Modes |
-
----
-
-## 12. Safety checklist
-
-- [ ] Props off for first software tests  
-- [ ] ARM / ANGLE ranges verified in INAV Modes  
-- [ ] Know **X** (disarm) and **Q** (quit)  
-- [ ] Start with assist on the bench; only then consider props-on outdoor tests with a buddy box / kill switch  
-- [ ] Treat AI follow as an experiment — always keep a manual override path  
-
----
-
-## Quick start
-
-```bash
-.venv\Scripts\activate
-pip install -r requirements.txt
-# edit CONTROL_PORT / CAMERA_INDEX in main.py
-python main.py
-```
-
-**L** → drag lock → watch error shrink with assist → **X** / **Q** when done.
+1. **Multi-Camera Stereo Vision Migration:** Dual MIPI CSI-2 interfaces allow for hardware binocular depth mapping.
+2. **LiDAR / Time-of-Flight (ToF) Integration:** Augment optic distance tracking with millimeter-accurate altitude measurements.
+3. **Model Context Protocol / AI Swarm Extension:** MAVLink setpoint pipeline supports swarm coordination.
+4. **Over-The-Air (OTA) Firmware Updates:** Background firmware flashing via dual-bank Flash and Linux systemd frameworks.

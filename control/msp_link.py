@@ -17,6 +17,7 @@ MSP_ALTITUDE = 109
 MSP_ANALOG = 110
 MSP_RC = 105
 MSP_STATUS_EX = 150
+MSP_DISPLAYPORT = 182
 MSP_SET_RAW_RC = 200
 
 NUM_CHANNELS = 16
@@ -145,6 +146,29 @@ def parse_msp_analog(payload: bytes) -> dict | None:
     return None
 
 
+def parse_msp_rc(payload: bytes) -> list[int] | None:
+    """Parse MSP_RC (105): RC channel values (16 channels max)."""
+    if len(payload) >= 2:
+        num_channels = len(payload) // 2
+        channels = list(struct.unpack("<" + "H" * num_channels, payload[:num_channels * 2]))
+        return channels
+    return None
+
+
+def build_msp_displayport_draw(row: int, col: int, text: str) -> bytes:
+    """Build $M< payload for MSP_DISPLAYPORT (182) to draw text."""
+    # Subcmd 3 = DRAW_STRING
+    attr = 0  # Normal text
+    payload = struct.pack("<B B B B", 3, row, col, attr) + text.encode("ascii", "ignore")
+    size = len(payload)
+    
+    checksum = size ^ MSP_DISPLAYPORT
+    for b in payload:
+        checksum ^= b
+    checksum &= 0xFF
+    return b"$M<" + bytes([size, MSP_DISPLAYPORT]) + payload + bytes([checksum])
+
+
 def parse_msp_altitude(payload: bytes) -> dict | None:
     """Parse MSP_ALTITUDE (109): Altitude in meters and vario."""
     if len(payload) >= 6:
@@ -195,58 +219,30 @@ def make_rc_channels(
     pitch: int = RC_MID,
     yaw: int = RC_MID,
     throttle: int = RC_MIN,
-    arm: bool = False,
-    flight_mode: bool = False,
-    aux1: int | None = None,
-    aux2: int | None = None,
-    aux3: int | None = None,
-    aux4: int | None = None,
-    channel_map: str = "AETR",
-    arm_channel: int = ARM_CH,
-    mode_channel: int = MODE_CH,
-    arm_high: int = ARM_HIGH,
-    arm_low: int = ARM_LOW,
-    mode_high: int = MODE_HIGH,
-    mode_low: int = MODE_LOW,
-    channel_overrides: dict[int, int] | None = None,
+    base_channels: list[int] | None = None,
+    roll_ch: int = 0,
+    pitch_ch: int = 1,
+    throttle_ch: int = 2,
+    yaw_ch: int = 3,
 ) -> list[int]:
-    """Assemble 16-channel RC array supporting AETR/TAER maps and AUX overrides.
-
-    Channel indices are 0-based (CH1=0 … CH16=15).
-    AUX1 is typically index 4 (CH5), AUX2 index 5 (CH6).
+    """Assemble 16-channel RC array.
+    
+    If base_channels is provided, it modifies only the dynamically mapped
+    roll, pitch, yaw, and throttle axes on top of the base_channels array.
     """
-    ch = [RC_MID] * NUM_CHANNELS
+    if base_channels and len(base_channels) >= NUM_CHANNELS:
+        ch = list(base_channels[:NUM_CHANNELS])
+    else:
+        ch = [RC_MID] * NUM_CHANNELS
+        ch[4] = 1000  # Default disarm if no base provided
 
-    map_str = channel_map.upper()
-    if map_str.startswith("TAER"):
-        ch[0] = clamp(throttle, RC_MIN, RC_MAX)
-        ch[1] = clamp(roll, RC_MIN, RC_MAX)
-        ch[2] = clamp(pitch, RC_MIN, RC_MAX)
-        ch[3] = clamp(yaw, RC_MIN, RC_MAX)
-    else:  # AETR
-        ch[0] = clamp(roll, RC_MIN, RC_MAX)
-        ch[1] = clamp(pitch, RC_MIN, RC_MAX)
-        ch[2] = clamp(throttle, RC_MIN, RC_MAX)
-        ch[3] = clamp(yaw, RC_MIN, RC_MAX)
-
-    # Default AUX1–AUX4 mid/low unless explicitly provided
-    ch[4] = clamp(aux1 if aux1 is not None else RC_MID, RC_MIN, RC_MAX)
-    ch[5] = clamp(aux2 if aux2 is not None else RC_MID, RC_MIN, RC_MAX)
-    ch[6] = clamp(aux3 if aux3 is not None else RC_MID, RC_MIN, RC_MAX)
-    ch[7] = clamp(aux4 if aux4 is not None else RC_MID, RC_MIN, RC_MAX)
-
-    # Explicit per-channel overrides first (joystick AUX mapping, etc.)
-    if channel_overrides:
-        for idx, pwm in channel_overrides.items():
-            i = int(idx)
-            if 0 <= i < NUM_CHANNELS:
-                ch[i] = clamp(pwm, RC_MIN, RC_MAX)
-
-    # ARM / Mode MUST win after overrides so software + remote arm state is consistent
-    # and a released AUX button cannot silently disarm under an active ARM request.
-    a_ch = max(0, min(NUM_CHANNELS - 1, int(arm_channel)))
-    m_ch = max(0, min(NUM_CHANNELS - 1, int(mode_channel)))
-    ch[a_ch] = clamp(arm_high if arm else arm_low, RC_MIN, RC_MAX)
-    ch[m_ch] = clamp(mode_high if flight_mode else mode_low, RC_MIN, RC_MAX)
+    if 0 <= roll_ch < NUM_CHANNELS:
+        ch[roll_ch] = clamp(roll, RC_MIN, RC_MAX)
+    if 0 <= pitch_ch < NUM_CHANNELS:
+        ch[pitch_ch] = clamp(pitch, RC_MIN, RC_MAX)
+    if 0 <= throttle_ch < NUM_CHANNELS:
+        ch[throttle_ch] = clamp(throttle, RC_MIN, RC_MAX)
+    if 0 <= yaw_ch < NUM_CHANNELS:
+        ch[yaw_ch] = clamp(yaw, RC_MIN, RC_MAX)
 
     return ch

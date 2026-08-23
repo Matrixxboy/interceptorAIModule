@@ -1,174 +1,226 @@
 """
-Arjuna — AI-Powered Autonomous Target Tracking & Drone Control Platform.
-
-Runs the Arjuna GCS (PyQt6) by default.
-Supports --cli flag for headless / OpenCV bench mode.
-Supports --legacy flag for the previous main window layout.
+Radxa ZERO 3W Headless Onboard Daemon for FPV Target Tracking.
+Runs entirely without GUI components.
 """
 
-from __future__ import annotations
-
 import argparse
-import faulthandler
-import os
-import sys
-import threading
+import time
+import cv2
+import serial
 import traceback
-
-os.environ["OPENCV_LOG_LEVEL"] = "OFF"
-os.environ["OPENCV_VIDEOINPUT_MSMF_ENABLE_HW_TRANSFORMS"] = "0"
-
-from paths import LOGS_DIR, ROOT
-
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+from pathlib import Path
 
 from config import SystemConfig
-
-_FAULT_LOG = None
-
-
-def install_crash_logging() -> None:
-    """Persist Python and native crash details even when launched without a console."""
-    global _FAULT_LOG
-    LOGS_DIR.mkdir(parents=True, exist_ok=True)
-    crash_path = LOGS_DIR / "crash.log"
-    native_path = LOGS_DIR / "native_crash.log"
-
-    def write_exception(exc_type, exc_value, exc_tb) -> None:
-        with crash_path.open("a", encoding="utf-8") as stream:
-            stream.write("\n=== Unhandled exception ===\n")
-            traceback.print_exception(exc_type, exc_value, exc_tb, file=stream)
-        sys.__excepthook__(exc_type, exc_value, exc_tb)
-
-    sys.excepthook = write_exception
-    if hasattr(threading, "excepthook"):
-        def thread_exception(args) -> None:
-            write_exception(args.exc_type, args.exc_value, args.exc_traceback)
-        threading.excepthook = thread_exception
-
-    try:
-        _FAULT_LOG = native_path.open("a", encoding="utf-8")
-        faulthandler.enable(file=_FAULT_LOG, all_threads=True)
-    except (OSError, RuntimeError):
-        _FAULT_LOG = None
+from core.state_machine import TargetTrackingStateMachine, TrackingState
+from control.rc_manager import RCManager
+from detection.hybrid_tracker import HybridYoloLockTracker
+from control.fpv_follow import FPVFollowController
+from control.msp_link import (
+    build_msp_request,
+    read_msp_response,
+    parse_msp_rc,
+    build_msp_displayport_draw,
+    MSP_RC,
+    make_rc_channels
+)
 
 
-def run_gui(cfg: SystemConfig, legacy: bool = False) -> None:
-    try:
-        from PyQt6.QtWidgets import QApplication
-    except ImportError as e:
-        print(f"[WARN] PyQt6 GUI unavailable ({e}). Falling back to CLI mode.")
-        traceback.print_exc()
-        run_cli(cfg)
-        return
+class OnboardTracker:
+    def __init__(self, config_path: str):
+        self.config_path = Path(config_path)
+        self.cfg = self._load_config()
+        self.rc_manager = RCManager(self.cfg)
+        self.state_machine = TargetTrackingStateMachine()
+        
+        self.hybrid_tracker = HybridYoloLockTracker(
+            det_cfg=self.cfg.detection,
+            tracker_cfg=self.cfg.tracker,
+        )
+        self.controller = FPVFollowController(self.cfg)
 
-    app = QApplication(sys.argv)
-    app.setApplicationName("Arjuna")
-    app.setOrganizationName("Arjuna GCS")
+        self.ser = None
+        self._init_serial()
+        self.cap = None
+        self._init_camera()
 
-    if legacy:
-        from gui.main_window import MainWindow
-        window = MainWindow(cfg)
-    else:
-        from gui.arjuna_shell import ArjunaShell
-        window = ArjunaShell(cfg)
+        self.last_rc_poll = 0.0
+        self.last_osd_draw = 0.0
+        self.last_channels = None
 
-    window.show()
-    sys.exit(app.exec())
+    def _load_config(self) -> SystemConfig:
+        if not self.config_path.exists():
+            print(f"[WARN] Config {self.config_path} not found. Generating default config.json.")
+            cfg = SystemConfig()
+            cfg.save_json(self.config_path)
+            return cfg
+        return SystemConfig.load_json(self.config_path)
 
+    def _init_serial(self):
+        # In a real onboard scenario, you'd specify the UART port in config.json.
+        # Defaulting to /dev/ttyS2 for Radxa UART2 based on integration docs.
+        # Here we'll try a list of fallbacks for dev purposes.
+        ports = ["/dev/ttyS2", "/dev/ttyUSB0", "COM3"]
+        for port in ports:
+            try:
+                self.ser = serial.Serial(port, 115200, timeout=0.01)
+                print(f"[INFO] Connected to FC on {port}")
+                return
+            except Exception:
+                pass
+        print("[WARN] Could not connect to Flight Controller UART.")
 
-def run_cli(cfg: SystemConfig) -> None:
-    import cv2
-    import numpy as np
-    import time
-    from control.fpv_follow import FPVFollowController
+    def _init_camera(self):
+        cam_idx = self.cfg.camera.camera_index
+        # Try GStreamer pipeline for Rockchip/Linux hardware scaling first
+        gst_pipeline = (
+            f"v4l2src device=/dev/video{cam_idx} ! "
+            f"video/x-raw, width={self.cfg.camera.frame_width}, height={self.cfg.camera.frame_height}, framerate={int(self.cfg.camera.target_fps)}/1 ! "
+            "videoconvert ! appsink"
+        )
+        self.cap = cv2.VideoCapture(gst_pipeline, cv2.CAP_GSTREAMER)
+        
+        # Fallback to standard V4L2 index
+        if not self.cap.isOpened():
+            self.cap = cv2.VideoCapture(cam_idx)
+        if not self.cap.isOpened():
+            self.cap = cv2.VideoCapture(0)
+            
+        if self.cap.isOpened():
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.cfg.camera.frame_width)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.cfg.camera.frame_height)
+            fps = max(15.0, min(120.0, float(self.cfg.camera.target_fps or 60.0)))
+            self.cap.set(cv2.CAP_PROP_FPS, fps)
+            print(f"[INFO] Camera initialized successfully at {fps} FPS.")
+        else:
+            print("[ERROR] Camera initialization failed.")
 
-    if hasattr(cv2, "setLogLevel"):
-        cv2.setLogLevel(cv2.LOG_LEVEL_SILENT)
+    def draw_osd_brackets(self, locked: bool):
+        if not self.ser or not self.ser.is_open:
+            return
+        # Method 2: FC MSP Canvas OSD
+        # Draw target brackets or idle text
+        text = "[ TARGET LOCK ]" if locked else "    IDLE       "
+        try:
+            # Row 5, Col 10
+            payload = build_msp_displayport_draw(5, 10, text)
+            self.ser.write(payload)
+        except Exception as e:
+            print(f"[ERROR] OSD Draw failed: {e}")
 
-    print("=" * 80)
-    print(" FPV MSP LOCK + FOLLOW (CLI Bench Mode)")
-    print("=" * 80)
+    def poll_rc(self) -> list[int] | None:
+        if not self.ser or not self.ser.is_open:
+            return None
+            
+        # Send MSP_RC request
+        try:
+            self.ser.write(build_msp_request(MSP_RC))
+            res = read_msp_response(self.ser, timeout=0.02)
+            if res:
+                cmd, payload = res
+                if cmd == MSP_RC:
+                    return parse_msp_rc(payload)
+        except Exception:
+            pass
+        return None
 
-    cap = cv2.VideoCapture(cfg.camera.camera_index)
-    if not cap.isOpened():
-        cap = cv2.VideoCapture(0)
+    def run(self):
+        print("[INFO] Onboard tracking daemon started.")
+        while True:
+            frame_start = time.perf_counter()
+            now = time.time()
 
-    if cap is not None and cap.isOpened():
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, cfg.camera.frame_width)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, cfg.camera.frame_height)
-
-    controller = FPVFollowController(cfg)
-    window_name = "FPV Autonomous Tracking (CLI Mode)"
-    cv2.namedWindow(window_name)
-
-    print("\nPress 'Q' to quit CLI mode.\n")
-
-    failed_reads = 0
-    while True:
-        ok = False
-        frame = None
-        if cap is not None and cap.isOpened():
-            ok, frame = cap.read()
+            # 1. Capture Frame
+            ok = False
+            frame = None
+            if self.cap and self.cap.isOpened():
+                ok, frame = self.cap.read()
+                
             if not ok or frame is None:
-                failed_reads += 1
-                if failed_reads >= 5:
-                    cap.release()
-                    cap = None
-            else:
-                failed_reads = 0
+                print("[WARN] Camera frame dropped.")
+                time.sleep(0.01)
+                continue
 
-        if not ok or frame is None:
-            frame = np.zeros((720, 1280, 3), dtype=np.uint8)
-            cv2.putText(frame, "SIMULATED STREAM (No Camera Detected)", (350, 360), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 180, 255), 2)
+            if now - self.last_rc_poll >= 0.02:
+                self.last_rc_poll = now
+                channels = self.poll_rc()
+                if channels:
+                    self.last_channels = channels
+                    lock_sw, follow_sw = self.rc_manager.parse_channels(channels)
+                else:
+                    # RC Signal Loss / Timeout
+                    lock_sw, follow_sw = False, False
 
-        cv2.imshow(window_name, frame)
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord("q"):
-            break
+                # 3. Target Detection & Tracking
+                best_bbox = None
+                has_target = False
+                
+                # Check current state *before* evaluating lock switch to know if we need to track
+                if self.state_machine.state in [TrackingState.TARGET_LOCKED, TrackingState.FOLLOWING] or lock_sw:
+                    if self.hybrid_tracker.locked:
+                        res = self.hybrid_tracker.update(frame)
+                        if res.ok and res.bbox_xywh:
+                            best_bbox = res.bbox_xywh
+                            has_target = True
+                    else:
+                        # Attempt lock if we just flipped the switch
+                        best = self.hybrid_tracker.lock_best(frame)
+                        if best:
+                            best_bbox = self.hybrid_tracker._bbox
+                            has_target = True
 
-    cap.release()
-    cv2.destroyAllWindows()
+                # 4. State Machine Update
+                current_state = self.state_machine.update(lock_sw, follow_sw, has_target)
 
+                # 5. Handle State Actions
+                if current_state == TrackingState.IDLE:
+                    self.hybrid_tracker.reset()
+                    self.controller.reset()
+                    
+                elif current_state == TrackingState.TARGET_LOCKED:
+                    self.controller.reset()  # No commands sent, but keep tracking
+                    
+                elif current_state == TrackingState.FOLLOWING:
+                    # Execute active PID tracking commands
+                    h, w = frame.shape[:2]
+                    roll, pitch, yaw, throttle = self.controller.update(
+                        best_bbox, w, h, base_throttle=1500
+                    )
+                    # Send commands to FC, preserving the pilot's AUX switches
+                    if self.ser and self.ser.is_open and self.last_channels:
+                        rc_payload = make_rc_channels(
+                            roll=roll, pitch=pitch, yaw=yaw, throttle=throttle, 
+                            base_channels=self.last_channels,
+                            roll_ch=self.cfg.rc_control.roll_channel,
+                            pitch_ch=self.cfg.rc_control.pitch_channel,
+                            throttle_ch=self.cfg.rc_control.throttle_channel,
+                            yaw_ch=self.cfg.rc_control.yaw_channel,
+                        )
+                        from control.msp_link import build_msp_set_raw_rc
+                        self.ser.write(build_msp_set_raw_rc(rc_payload))
 
-def main() -> None:
-    install_crash_logging()
-    parser = argparse.ArgumentParser(description="Arjuna — AI Target Tracking & Drone Control GCS")
-    parser.add_argument("--cli", action="store_true", help="Run in OpenCV CLI mode instead of PyQt6 GUI")
-    parser.add_argument("--legacy", action="store_true", help="Use legacy main window layout")
-    parser.add_argument("--config", type=str, default=None, help="Path to JSON configuration preset")
-    parser.add_argument(
-        "--cpu",
-        action="store_true",
-        help="Disable CUDA/FP16 (use this to diagnose NVIDIA/PyTorch compatibility)",
-    )
-    parser.add_argument(
-        "--safe-mode",
-        action="store_true",
-        help="Start conservatively on CPU with optional controllers disabled",
-    )
-    args = parser.parse_args()
+                # 6. Canvas OSD Update (Method 2)
+                if now - self.last_osd_draw >= 0.1:  # 10Hz OSD refresh
+                    self.last_osd_draw = now
+                    self.draw_osd_brackets(locked=has_target)
 
-    cfg = SystemConfig()
-    if args.config:
-        cfg = SystemConfig.load_json(args.config)
-    else:
-        from estimation.distance_calib import load_distance_calib
-        load_distance_calib(cfg)
-
-    if args.cpu or args.safe_mode:
-        cfg.detection.device = "cpu"
-        cfg.detection.half = False
-    if args.safe_mode:
-        cfg.joystick.enabled = False
-        cfg.camera.stabilize_with_attitude = False
-
-    if args.cli:
-        run_cli(cfg)
-    else:
-        run_gui(cfg, legacy=args.legacy)
+            # Cap max FPS loop rate
+            target_fps = max(15.0, min(120.0, float(self.cfg.camera.target_fps or 60.0)))
+            frame_budget = 1.0 / target_fps
+            elapsed = time.perf_counter() - frame_start
+            if elapsed < frame_budget:
+                time.sleep(frame_budget - elapsed)
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default="config.json", help="Path to centralized configuration JSON")
+    args = parser.parse_args()
+    
+    try:
+        daemon = OnboardTracker(args.config)
+        daemon.run()
+    except KeyboardInterrupt:
+        print("\n[INFO] Shutting down onboard daemon.")
+    except Exception as e:
+        print(f"[FATAL] Unhandled exception: {e}")
+        traceback.print_exc()

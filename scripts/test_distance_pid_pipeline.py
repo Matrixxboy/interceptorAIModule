@@ -1,7 +1,7 @@
 """
 Test: Pinhole distance estimation + PID -> RC mapping pipeline.
 
-Validates the vision->control loop used by Arjuna / FPV follow:
+Validates the vision->control loop used by T.R.I.V.E.N.I / FPV follow:
 
   Distance = (Known_Width x Focal_Length) / Pixel_Width
 
