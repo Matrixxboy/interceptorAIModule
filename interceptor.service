@@ -1,0 +1,18 @@
+[Unit]
+Description=T.R.I.V.E.N.I Onboard FPV Interceptor Daemon
+After=network.target multi-user.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=radxa
+WorkingDirectory=/home/radxa/interceptorAIModule
+ExecStart=/usr/bin/python3 main.py --config config.json
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+Nice=-10
+
+[Install]
+WantedBy=multi-user.target

@@ -1,7 +1,10 @@
-# FPV MSP visual lock + follow
-# Optional CUDA torch: https://pytorch.org
-#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+# FPV MSP visual lock + follow for Radxa ZERO 3 (2GB RAM Linux SBC)
+# Minimal dependencies to prevent OOM errors:
 
 opencv-contrib-python>=4.8
 numpy>=1.24
 pyserial>=3.5
+
+# NOTE FOR RADXA ZERO 3:
+# Do NOT install PyTorch ('torch' / 'ultralytics') on 2GB RAM SBCs.
+# OpenCV DNN is used for lightweight ONNX model inference.

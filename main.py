@@ -56,10 +56,18 @@ class OnboardTracker:
         return SystemConfig.load_json(self.config_path)
 
     def _init_serial(self):
-        # In a real onboard scenario, you'd specify the UART port in config.json.
-        # Defaulting to /dev/ttyS2 for Radxa UART2 based on integration docs.
-        # Here we'll try a list of fallbacks for dev purposes.
-        ports = ["/dev/ttyS2", "/dev/ttyUSB0", "COM3"]
+        # Defaulting to /dev/ttyS2 for Radxa ZERO 3 40-pin header UART2 (pins 8/10)
+        # Fallback list covers Linux SBC device nodes and dev USB bridges.
+        ports = [
+            "/dev/ttyS2",
+            "/dev/ttyS0",
+            "/dev/ttyS4",
+            "/dev/ttyFIQ0",
+            "/dev/ttyUSB0",
+            "/dev/ttyACM0",
+            "COM3",
+            "COM4",
+        ]
         for port in ports:
             try:
                 self.ser = serial.Serial(port, 115200, timeout=0.01)
@@ -68,31 +76,52 @@ class OnboardTracker:
             except Exception:
                 pass
         print("[WARN] Could not connect to Flight Controller UART.")
+        print("       On Radxa ZERO 3, verify UART2 wiring on GPIO Pins 8 (TX) / 10 (RX) & user dialout group permissions.")
 
     def _init_camera(self):
         cam_idx = self.cfg.camera.camera_index
-        # Try GStreamer pipeline for Rockchip/Linux hardware scaling first
-        gst_pipeline = (
-            f"v4l2src device=/dev/video{cam_idx} ! "
-            f"video/x-raw, width={self.cfg.camera.frame_width}, height={self.cfg.camera.frame_height}, framerate={int(self.cfg.camera.target_fps)}/1 ! "
-            "videoconvert ! appsink"
-        )
-        self.cap = cv2.VideoCapture(gst_pipeline, cv2.CAP_GSTREAMER)
-        
-        # Fallback to standard V4L2 index
-        if not self.cap.isOpened():
-            self.cap = cv2.VideoCapture(cam_idx)
-        if not self.cap.isOpened():
-            self.cap = cv2.VideoCapture(0)
-            
-        if self.cap.isOpened():
-            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.cfg.camera.frame_width)
-            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.cfg.camera.frame_height)
-            fps = max(15.0, min(120.0, float(self.cfg.camera.target_fps or 60.0)))
-            self.cap.set(cv2.CAP_PROP_FPS, fps)
-            print(f"[INFO] Camera initialized successfully at {fps} FPS.")
-        else:
-            print("[ERROR] Camera initialization failed.")
+        w = self.cfg.camera.frame_width
+        h = self.cfg.camera.frame_height
+        target_fps = int(self.cfg.camera.target_fps or 60)
+
+        # GStreamer pipelines for Rockchip/Linux hardware & MS2109 USB capture dongles
+        gst_pipelines = [
+            # 1. MJPEG pipeline (Ideal for MS2109 USB capture & high FPS)
+            (
+                f"v4l2src device=/dev/video{cam_idx} io-mode=2 ! "
+                f"image/jpeg, width={w}, height={h}, framerate={target_fps}/1 ! "
+                "jpegdec ! videoconvert ! appsink"
+            ),
+            # 2. Raw YUV pipeline
+            (
+                f"v4l2src device=/dev/video{cam_idx} ! "
+                f"video/x-raw, width={w}, height={h}, framerate={target_fps}/1 ! "
+                "videoconvert ! appsink"
+            ),
+        ]
+
+        for pipe in gst_pipelines:
+            try:
+                self.cap = cv2.VideoCapture(pipe, cv2.CAP_GSTREAMER)
+                if self.cap and self.cap.isOpened():
+                    print(f"[INFO] Camera initialized via GStreamer on /dev/video{cam_idx}")
+                    return
+            except Exception:
+                pass
+
+        # Fallback to standard V4L2 index with MJPG FOURCC
+        for idx in [cam_idx, 0, 1, 2]:
+            self.cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
+            if self.cap and self.cap.isOpened():
+                self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+                self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
+                self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
+                fps = max(15.0, min(120.0, float(target_fps)))
+                self.cap.set(cv2.CAP_PROP_FPS, fps)
+                print(f"[INFO] Camera initialized via V4L2 on index {idx} ({w}x{h} @ {fps} FPS).")
+                return
+
+        print("[ERROR] Camera initialization failed across all GStreamer and V4L2 devices.")
 
     def draw_osd_brackets(self, locked: bool):
         if not self.ser or not self.ser.is_open:

@@ -20,32 +20,75 @@ class YOLODetector:
     def __init__(self, cfg: DetectionConfig | None = None) -> None:
         self.cfg = cfg or CONFIG.detection
         self._net = None
+        self._device = "cpu"
+        self._half = False
         self._names: dict[int, str] = {i: c for i, c in enumerate(AERIAL_THREAT_CLASSES)}
         self._load()
 
+    @property
+    def device(self) -> str:
+        return self._device
+
+    @property
+    def half(self) -> bool:
+        return self._half
+
     def _resolve_weights(self) -> str:
-        mode = self.cfg.mode
         MODELS_DIR.mkdir(parents=True, exist_ok=True)
-        if mode == "custom":
-            custom = Path(self.cfg.custom_weights)
-            if custom.is_file():
-                return str(custom)
-        # default to model_path
-        path = Path(self.cfg.model_path)
-        if path.is_file():
-            return str(path)
-        return str(ROOT / self.cfg.model_name)
+        
+        # Primary candidate paths to check based on configuration
+        candidates: list[Path] = []
+        
+        if self.cfg.mode == "custom" and self.cfg.custom_weights:
+            p = Path(self.cfg.custom_weights)
+            candidates.extend([p, ROOT / p, MODELS_DIR / p.name])
+            if p.suffix == ".pt":
+                candidates.extend([p.with_suffix(".onnx"), MODELS_DIR / p.with_suffix(".onnx").name])
+
+        if self.cfg.model_path:
+            p = Path(self.cfg.model_path)
+            candidates.extend([p, ROOT / p, MODELS_DIR / p.name])
+            if p.suffix == ".pt":
+                candidates.extend([p.with_suffix(".onnx"), MODELS_DIR / p.with_suffix(".onnx").name])
+
+        if self.cfg.model_name:
+            name_p = Path(self.cfg.model_name)
+            candidates.extend([ROOT / name_p, MODELS_DIR / name_p.name])
+            if name_p.suffix == ".pt":
+                candidates.extend([ROOT / name_p.with_suffix(".onnx"), MODELS_DIR / name_p.with_suffix(".onnx").name])
+
+        # Standard fallback defaults
+        candidates.extend([
+            MODELS_DIR / "yolov8n.onnx",
+            ROOT / "yolov8n.onnx",
+            MODELS_DIR / "drone_missile_best.onnx",
+            ROOT / "yolov8n.pt",
+            MODELS_DIR / "yolov8n.pt"
+        ])
+
+        for cand in candidates:
+            try:
+                if cand.is_file() and cand.stat().st_size > 0:
+                    return str(cand.resolve())
+            except Exception:
+                continue
+
+        # Fall back to nominal target path even if missing (error caught in _load)
+        return str((MODELS_DIR / "yolov8n.onnx").resolve())
 
     def _load(self) -> None:
         weights = self._resolve_weights()
         log.info("Loading Lightweight ONNX YOLO: %s", weights)
         try:
             self._net = cv2.dnn.readNetFromONNX(weights)
-            # Use CPU backend for maximum stability on generic ARM without specific NPU drivers
+            # Use CPU backend for maximum stability on ARM Cortex-A55 without specific NPU drivers
             self._net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
             self._net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+            self._device = "cpu"
+            self._half = False
+            log.info("ONNX YOLO loaded successfully on CPU (NEON optimized).")
         except Exception as exc:
-            log.error("Failed to load ONNX model via cv2.dnn: %s", exc)
+            log.error("Failed to load ONNX model via cv2.dnn from %s: %s", weights, exc)
 
     @property
     def names(self) -> dict[int, str]:

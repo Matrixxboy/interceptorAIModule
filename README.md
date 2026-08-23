@@ -83,6 +83,41 @@ python main.py
 
 ---
 
+## 2. Onboard Radxa ZERO 3 (RK3566, 2GB RAM) Companion Setup
+
+To run the tracking daemon on the **Radxa ZERO 3** (2GB RAM Linux SBC) connected to an INAV / Betaflight FC via MSP over UART2 (`/dev/ttyS2`):
+
+### Installation & System Setup
+```bash
+# 1. Run automated Radxa setup (Installs OpenCV, V4L2, GStreamer, sets user permissions & performance governor)
+chmod +x scripts/setup_radxa.sh
+./scripts/setup_radxa.sh
+
+# 2. Run system diagnostics
+python3 scripts/diagnose_system.py
+```
+
+### Model Conversion (On PC)
+On 2GB RAM Linux SBCs, PyTorch causes Out-Of-Memory (OOM) crashes. OpenCV DNN with ONNX models is used instead.
+Convert your PyTorch `.pt` model to `.onnx` on your PC before copying to Radxa:
+```bash
+python scripts/export_to_onnx.py --weights models/drone_missile_best.pt
+```
+
+### Running Onboard
+```bash
+# Start tracking daemon manually
+python3 main.py --config config.json
+
+# Enable auto-start on boot via systemd
+sudo cp interceptor.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable interceptor
+sudo systemctl start interceptor
+```
+
+---
+
 ## 2. Production-Grade Embedded System Architecture & Technical Specification
 
 > [!NOTE]
