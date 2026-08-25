@@ -112,12 +112,12 @@ class CameraConfig:
 @dataclass
 class DetectionConfig:
     mode: DetectionMode = "coco"
-    model_name: str = "yolov8n.onnx"
-    model_path: Path = field(default_factory=lambda: MODELS_DIR / "yolov8n.onnx")
+    model_name: str = "yolov8_fast_precision.onnx"
+    model_path: Path = field(default_factory=lambda: MODELS_DIR / "yolov8_fast_precision.onnx")
     custom_weights: Path = field(
         default_factory=lambda: MODELS_DIR / "drone_missile_best.onnx"
     )
-    imgsz: int = 640
+    imgsz: int = 416
     conf_threshold: float = 0.25
     iou_threshold: float = 0.45
     max_det: int = 20

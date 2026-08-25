@@ -1,10 +1,10 @@
 {
   "detection": {
     "mode": "coco",
-    "model_name": "yolov8n.onnx",
-    "model_path": "models/yolov8n.onnx",
+    "model_name": "yolov8_fast_precision.onnx",
+    "model_path": "models/yolov8_fast_precision.onnx",
     "custom_weights": "models/drone_missile_best.onnx",
-    "imgsz": 640,
+    "imgsz": 416,
     "conf_threshold": 0.25,
     "iou_threshold": 0.45,
     "max_det": 20,
@@ -36,14 +36,14 @@
   },
   "tracker": {
     "backend": "bytetrack",
-    "max_age": 45,
+    "max_age": 90,
     "min_hits": 2,
-    "iou_match_threshold": 0.25,
-    "lock_tracker": "none",
-    "reacquire_iou": 0.12,
-    "reacquire_max_frames": 90,
+    "iou_match_threshold": 0.35,
+    "lock_tracker": "kcf",
+    "reacquire_iou": 0.25,
+    "reacquire_max_frames": 180,
     "enable_template_fallback": true,
-    "template_match_threshold": 0.45
+    "template_match_threshold": 0.50
   },
   "yaw_pid": {
     "kp": 340,

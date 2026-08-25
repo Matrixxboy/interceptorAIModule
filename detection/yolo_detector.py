@@ -128,8 +128,10 @@ class YOLODetector:
         x_factor = frame_w / self.cfg.imgsz
         y_factor = frame_h / self.cfg.imgsz
         
-        class_filter = self.cfg.class_filter if self.cfg.mode == "coco" else ()
-
+        all_boxes = []
+        filtered_boxes = []
+        
+        class_filter = set(self.cfg.class_filter) if (self.cfg.mode == "coco" and self.cfg.class_filter) else set()
         conf_thres = self.cfg.conf_threshold
         
         for row in output:
@@ -137,18 +139,15 @@ class YOLODetector:
             _, max_score, _, max_idx = cv2.minMaxLoc(scores)
             
             if max_score >= conf_thres:
-                cls_id = max_idx[1]
-                if class_filter and cls_id not in class_filter:
-                    continue
-                    
+                cls_id = int(max_idx[1])
                 x, y, w, h = row[0].item(), row[1].item(), row[2].item(), row[3].item()
                 left = int((x - 0.5 * w) * x_factor)
                 top = int((y - 0.5 * h) * y_factor)
                 width = int(w * x_factor)
                 height = int(h * y_factor)
                 
-                label = self._names.get(cls_id, str(cls_id))
-                boxes.append(BBox(
+                label = self._names.get(cls_id, f"obj_{cls_id}")
+                bbox = BBox(
                     x1=max(0, left), 
                     y1=max(0, top), 
                     x2=min(frame_w, left + width), 
@@ -157,11 +156,17 @@ class YOLODetector:
                     cls_id=cls_id,
                     track_id=-1,
                     label=label
-                ))
+                )
+                all_boxes.append(bbox)
+                if not class_filter or cls_id in class_filter:
+                    filtered_boxes.append(bbox)
+
+        # Strictly return target class boxes only (Person, Quadcopter/Drone, Helicopter, Missile)
+        boxes = filtered_boxes
                 
         # NMS
         if boxes:
-            cv_boxes = [[b.x1, b.y1, b.x2-b.x1, b.y2-b.y1] for b in boxes]
+            cv_boxes = [[b.x1, b.y1, b.x2 - b.x1, b.y2 - b.y1] for b in boxes]
             cv_scores = [b.conf for b in boxes]
             indices = cv2.dnn.NMSBoxes(cv_boxes, cv_scores, conf_thres, self.cfg.iou_threshold)
             final_boxes = []
