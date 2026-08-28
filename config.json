@@ -1,8 +1,8 @@
 {
   "detection": {
     "mode": "coco",
-    "model_name": "yolov8_fast_precision.onnx",
-    "model_path": "models/yolov8_fast_precision.onnx",
+    "model_name": "yolo11_fast_precision.onnx",
+    "model_path": "models/yolo11_fast_precision.onnx",
     "custom_weights": "models/drone_missile_best.onnx",
     "imgsz": 416,
     "conf_threshold": 0.25,
@@ -39,7 +39,7 @@
     "max_age": 90,
     "min_hits": 2,
     "iou_match_threshold": 0.35,
-    "lock_tracker": "kcf",
+    "lock_tracker": "none",
     "reacquire_iou": 0.25,
     "reacquire_max_frames": 180,
     "enable_template_fallback": true,
@@ -116,8 +116,8 @@
   "camera": {
     "fov_h_deg": 90,
     "fov_v_deg": 60,
-    "frame_width": 1280,
-    "frame_height": 720,
+    "frame_width": 640,
+    "frame_height": 480,
     "camera_index": 1,
     "target_fps": 60,
     "mount_pitch_deg": 0,

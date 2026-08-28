@@ -19,7 +19,6 @@ class TargetPatternFingerprint:
 
     def __init__(self) -> None:
         self.orb = cv2.ORB_create(nfeatures=120, scaleFactor=1.2, nlevels=4)
-        self.bf_matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
         self.kp_ref: list[cv2.KeyPoint] = []
         self.des_ref: np.ndarray | None = None
         self.template_pyramid: list[np.ndarray] = []

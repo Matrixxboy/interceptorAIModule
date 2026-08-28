@@ -63,7 +63,7 @@ class HybridResult:
 
 
 class HybridYoloLockTracker:
-    """Scale-aware box size (distance-grade) + flow/CSRT for center, YOLO gated."""
+    """Interceptor-grade target lock: Scale-aware + flow + velocity-compensated predictive tracking."""
 
     def __init__(
         self,
@@ -72,7 +72,7 @@ class HybridYoloLockTracker:
         cv_kind: CvKind = "csrt",
         yolo_every_n: int = 12,
         reacquire_iou: float = 0.25,
-        max_hold_frames: int = 20,
+        max_hold_frames: int = 60,
     ) -> None:
         self.det_cfg = det_cfg or CONFIG.detection
         self.tcfg = tracker_cfg or CONFIG.tracker
@@ -102,6 +102,12 @@ class HybridYoloLockTracker:
         self._detector_error: str | None = None
         self._target_id_seq = 1
         self._locked_target_id = -1
+        # Interceptor-grade velocity tracking for predictive hold
+        self._vx = 0.0  # Estimated target velocity X (pixels/frame)
+        self._vy = 0.0  # Estimated target velocity Y (pixels/frame)
+        self._last_cx = 0.0  # Previous center X
+        self._last_cy = 0.0  # Previous center Y
+        self._vel_alpha = 0.35  # EMA smoothing for velocity estimate
 
     def ensure_detector(self) -> YOLODetector:
         if self._detector_error is not None:
@@ -143,6 +149,10 @@ class HybridYoloLockTracker:
         self._lost = 0
         self._frame_i = 0
         self._manual_lock = False
+        self._vx = 0.0
+        self._vy = 0.0
+        self._last_cx = 0.0
+        self._last_cy = 0.0
 
     def detect_only(self, frame: np.ndarray) -> list[BBox]:
         dets = self.ensure_detector().detect(frame)
@@ -177,6 +187,20 @@ class HybridYoloLockTracker:
     def _set_bbox(self, xywh: tuple[float, float, float, float], snap: bool = False) -> tuple[int, int, int, int]:
         rx, ry, rw, rh = [float(v) for v in xywh]
         
+        # Update velocity estimate (interceptor-grade predictive tracking)
+        new_cx = rx + rw * 0.5
+        new_cy = ry + rh * 0.5
+        if self._bbox_f is not None and not snap:
+            raw_vx = new_cx - self._last_cx
+            raw_vy = new_cy - self._last_cy
+            self._vx = self._vel_alpha * raw_vx + (1.0 - self._vel_alpha) * self._vx
+            self._vy = self._vel_alpha * raw_vy + (1.0 - self._vel_alpha) * self._vy
+        else:
+            self._vx = 0.0
+            self._vy = 0.0
+        self._last_cx = new_cx
+        self._last_cy = new_cy
+
         if snap or self._bbox_f is None:
             self._bbox_f = (rx, ry, rw, rh)
         else:
@@ -184,8 +208,8 @@ class HybridYoloLockTracker:
             # Calculate step displacement (speed of target movement)
             step = float(np.hypot(rx - px, ry - py))
             
-            # Dynamic alpha: when target moves fast, respond quickly; when still, smooth heavily!
-            alpha_pos = max(0.30, min(0.88, 0.30 + 0.04 * step))
+            # Dynamic alpha: fast target → high alpha (instant response); slow target → heavy smoothing
+            alpha_pos = max(0.35, min(0.92, 0.35 + 0.05 * step))
             alpha_size = max(0.25, min(0.75, 0.25 + 0.03 * step))
             
             sx = alpha_pos * rx + (1.0 - alpha_pos) * px
@@ -462,9 +486,33 @@ class HybridYoloLockTracker:
             self._lost = 0
             return HybridResult(True, out, source, self._label, self._conf, dets)
 
+        # ── Interceptor-grade predictive hold ──
+        # When target is temporarily lost, coast using velocity vector
+        # instead of holding a static position. This keeps the lock box
+        # moving with the target during brief occlusions (smoke, flare, jitter).
         self._lost += 1
-        if self._lost <= self.max_hold_frames and self._bbox is not None:
-            return HybridResult(True, self._bbox, "hold", self._label, self._conf * 0.85, dets)
+        if self._lost <= self.max_hold_frames and self._bbox_f is not None:
+            px, py, pw, ph = self._bbox_f
+            # Apply velocity-compensated coast (predict where target moved)
+            speed = float(np.hypot(self._vx, self._vy))
+            if speed > 0.5 and self._lost <= 30:
+                # Active coast: project position using velocity
+                coast_x = px + self._vx
+                coast_y = py + self._vy
+                self._bbox_f = (coast_x, coast_y, pw, ph)
+                self._last_cx = coast_x + pw * 0.5
+                self._last_cy = coast_y + ph * 0.5
+                self._bbox = self._as_int(self._bbox_f)
+                # Decay velocity gradually so coast slows down
+                self._vx *= 0.92
+                self._vy *= 0.92
+                # Decay confidence more slowly during active coast
+                hold_conf = self._conf * max(0.50, 1.0 - self._lost * 0.015)
+                return HybridResult(True, self._bbox, "coast", self._label, hold_conf, dets)
+            else:
+                # Static hold: target was stationary or coast exhausted
+                hold_conf = self._conf * max(0.40, 1.0 - self._lost * 0.012)
+                return HybridResult(True, self._bbox, "hold", self._label, hold_conf, dets)
 
         self._locked = False
         return HybridResult(False, self._bbox, "lost", self._label, 0.0, dets)

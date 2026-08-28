@@ -22,7 +22,7 @@ class ScaleAwareLock:
         self._csrt = None
         self._last_score = 0.0
         self._frames = 0
-        self._full_every = 2  # full multi-scale every N frames
+        self._full_every = 5  # full multi-scale every N frames
         self._match_max_side = 96  # downscale template for faster NCC
 
     @property

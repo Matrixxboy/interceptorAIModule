@@ -22,6 +22,8 @@ from control.msp_link import (
     read_msp_response,
     parse_msp_rc,
     build_msp_displayport_draw,
+    build_msp_set_raw_rc,
+    draw_osd_target_box,
     MSP_RC,
     make_rc_channels
 )
@@ -59,8 +61,6 @@ class ThreadedCameraReader:
 
     def read(self) -> tuple[bool, np.ndarray | None]:
         with self.lock:
-            if self.frame is not None:
-                return self.ret, self.frame.copy()
             return self.ret, self.frame
 
 
@@ -103,12 +103,13 @@ class OnboardTracker:
         return SystemConfig.load_json(self.config_path)
 
     def _init_serial(self):
-        # Defaulting to /dev/ttyS2 for Radxa ZERO 3 40-pin header UART2 (pins 8/10)
-        # Fallback list covers Linux SBC device nodes and dev USB bridges.
+        # Defaulting to /dev/ttyS4 for Radxa ZERO 3 (UART4 on pins 27/28)
         ports = [
+            "/dev/ttyS4",
+            "/dev/ttyS7",
             "/dev/ttyS2",
             "/dev/ttyS0",
-            "/dev/ttyS4",
+            "/dev/ttyS3",
             "/dev/ttyFIQ0",
             "/dev/ttyUSB0",
             "/dev/ttyACM0",
@@ -117,7 +118,7 @@ class OnboardTracker:
         ]
         for port in ports:
             try:
-                self.ser = serial.Serial(port, 115200, timeout=0.01)
+                self.ser = serial.Serial(port, 115200, timeout=0.001)
                 print(f"[INFO] Connected to FC on {port}")
                 return
             except Exception:
@@ -172,22 +173,20 @@ class OnboardTracker:
 
         print("[ERROR] Camera initialization failed across all GStreamer and V4L2 devices.")
 
-    def draw_osd_brackets(self, locked: bool):
+    def draw_osd(self, locked: bool, bbox_xywh=None):
+        """Draw target bounding box, crosshair, and status on FPV goggles via MSP DisplayPort over UART2."""
         if not self.ser or not self.ser.is_open:
             return
+        fh, fw = self.cfg.camera.frame_height, self.cfg.camera.frame_width
         tid = getattr(self.hybrid_tracker, "target_id", -1)
-        if locked and tid > 0:
-            text = f" LOCK #{tid} "
-        elif locked:
-            text = "[ TARGET LOCK ]"
-        else:
-            text = "    IDLE       "
-        try:
-            # Row 5, Col 10
-            payload = build_msp_displayport_draw(5, 10, text)
-            self.ser.write(payload)
-        except Exception as e:
-            print(f"[ERROR] OSD Draw failed: {e}")
+        draw_osd_target_box(
+            self.ser,
+            bbox_xywh=bbox_xywh,
+            frame_w=fw,
+            frame_h=fh,
+            locked=locked,
+            target_id=tid,
+        )
 
     def poll_rc(self) -> list[int] | None:
         if not self.ser or not self.ser.is_open:
@@ -196,7 +195,7 @@ class OnboardTracker:
         # Send MSP_RC request
         try:
             self.ser.write(build_msp_request(MSP_RC))
-            res = read_msp_response(self.ser, timeout=0.02)
+            res = read_msp_response(self.ser, timeout=0.005)
             if res:
                 cmd, payload = res
                 if cmd == MSP_RC:
@@ -216,7 +215,7 @@ class OnboardTracker:
         while True:
             self._frame_count += 1
             frame_start = time.perf_counter()
-            now = time.time()
+            now = frame_start
             
             # FPS Calculation
             dt = frame_start - last_time
@@ -259,19 +258,25 @@ class OnboardTracker:
             candidate_boxes = []
 
             if self.hybrid_tracker.locked:
-                # OpenCV Pattern Lock (LK Optical Flow + Scale Template) updates target on 100% of frames at 60+ FPS
+                # OpenCV Pattern Lock (LK Optical Flow + Scale Template) updates target on 100% of frames
                 res = self.hybrid_tracker.update(frame)
                 candidate_boxes = res.detections or getattr(self, "_cached_candidates", [])
                 if res.ok and res.bbox_xywh:
                     best_bbox = res.bbox_xywh
                     has_target = True
+                elif lock_sw:
+                    # Target lost but lock switch still ON — try re-acquire nearest
+                    best = self.hybrid_tracker.lock_nearest_to_center(frame, center_xy=(cx_ref, cy_ref))
+                    if best or self.hybrid_tracker._bbox:
+                        best_bbox = self.hybrid_tracker._bbox
+                        has_target = True
             else:
-                # When unlocked: run YOLO detection every 4 frames (or on lock trigger) to keep camera feed smooth
+                # When unlocked: run YOLO detection every 4 frames (or on lock trigger)
                 if self._frame_count % 4 == 0 or lock_sw:
                     self._cached_candidates = self.hybrid_tracker.detect_only(frame)
                 candidate_boxes = getattr(self, "_cached_candidates", [])
                 
-                # Lock onto candidate nearest to center crosshair when Channel 7 / L key is active
+                # Lock onto candidate nearest to center crosshair when lock switch is active
                 if lock_sw:
                     best = self.hybrid_tracker.lock_nearest_to_center(frame, center_xy=(cx_ref, cy_ref))
                     if best or self.hybrid_tracker._bbox:
@@ -305,17 +310,16 @@ class OnboardTracker:
                         throttle_ch=self.cfg.rc_control.throttle_channel,
                         yaw_ch=self.cfg.rc_control.yaw_channel,
                     )
-                    from control.msp_link import build_msp_set_raw_rc
                     self.ser.write(build_msp_set_raw_rc(rc_payload))
 
-            # 6. Canvas OSD Update (Method 2)
+            # 6. OSD Bounding Box + Status on FPV Goggles via MSP DisplayPort (UART2 Pin 8/10)
             if now - self.last_osd_draw >= 0.1:  # 10Hz OSD refresh
                 self.last_osd_draw = now
-                self.draw_osd_brackets(locked=has_target)
+                self.draw_osd(locked=has_target, bbox_xywh=best_bbox)
 
             # 7. GUI Display & Keyboard Test Controls
             if self.show_window:
-                vis_frame = frame.copy()
+                vis_frame = frame
 
                 # Draw Center Crosshair
                 cv2.drawMarker(vis_frame, (cx_ref, cy_ref), (255, 255, 255), cv2.MARKER_CROSS, 24, 2)

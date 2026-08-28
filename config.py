@@ -112,8 +112,8 @@ class CameraConfig:
 @dataclass
 class DetectionConfig:
     mode: DetectionMode = "coco"
-    model_name: str = "yolov8_fast_precision.onnx"
-    model_path: Path = field(default_factory=lambda: MODELS_DIR / "yolov8_fast_precision.onnx")
+    model_name: str = "yolo11_fast_precision.onnx"
+    model_path: Path = field(default_factory=lambda: MODELS_DIR / "yolo11_fast_precision.onnx")
     custom_weights: Path = field(
         default_factory=lambda: MODELS_DIR / "drone_missile_best.onnx"
     )

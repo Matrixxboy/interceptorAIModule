@@ -169,6 +169,110 @@ def build_msp_displayport_draw(row: int, col: int, text: str) -> bytes:
     return b"$M<" + bytes([size, MSP_DISPLAYPORT]) + payload + bytes([checksum])
 
 
+def build_msp_displayport_clear() -> bytes:
+    """Build MSP_DISPLAYPORT subcmd 2 = CLEAR_SCREEN."""
+    payload = struct.pack("<B", 2)
+    size = len(payload)
+    checksum = (size ^ MSP_DISPLAYPORT ^ payload[0]) & 0xFF
+    return b"$M<" + bytes([size, MSP_DISPLAYPORT]) + payload + bytes([checksum])
+
+
+def build_msp_displayport_draw_screen() -> bytes:
+    """Build MSP_DISPLAYPORT subcmd 4 = DRAW_SCREEN (flush OSD buffer to display)."""
+    payload = struct.pack("<B", 4)
+    size = len(payload)
+    checksum = (size ^ MSP_DISPLAYPORT ^ payload[0]) & 0xFF
+    return b"$M<" + bytes([size, MSP_DISPLAYPORT]) + payload + bytes([checksum])
+
+
+def draw_osd_target_box(
+    ser,
+    bbox_xywh: tuple[int, int, int, int] | None,
+    frame_w: int,
+    frame_h: int,
+    locked: bool,
+    target_id: int = -1,
+    osd_cols: int = 30,
+    osd_rows: int = 16,
+) -> None:
+    """Draw target bounding box corners and status on FPV goggle OSD via MSP DisplayPort.
+
+    Converts pixel coordinates to OSD character grid and draws corner brackets
+    plus lock/follow status text. Works with INAV/Betaflight MSP DisplayPort over UART.
+
+    Args:
+        ser: serial.Serial connected to FC UART (Pin 8 TX / Pin 10 RX on Radxa ZERO 3).
+        bbox_xywh: Target bounding box in pixel coordinates (x, y, w, h), or None if no target.
+        frame_w: Camera frame width in pixels.
+        frame_h: Camera frame height in pixels.
+        locked: Whether a target is currently locked.
+        target_id: Persistent target ID number.
+        osd_cols: OSD character grid columns (30 for PAL analog, 50 for HD).
+        osd_rows: OSD character grid rows (16 for PAL analog, 18 for HD).
+    """
+    if ser is None or not ser.is_open:
+        return
+
+    try:
+        # 1. Clear OSD canvas
+        ser.write(build_msp_displayport_clear())
+
+        # 2. Draw center crosshair on OSD
+        cx_osd = osd_cols // 2
+        cy_osd = osd_rows // 2
+        ser.write(build_msp_displayport_draw(cy_osd, cx_osd - 1, "-+-"))
+        ser.write(build_msp_displayport_draw(cy_osd - 1, cx_osd, "|"))
+        ser.write(build_msp_displayport_draw(cy_osd + 1, cx_osd, "|"))
+
+        # 3. Draw target bounding box corners on OSD grid
+        if locked and bbox_xywh is not None:
+            bx, by, bw, bh = bbox_xywh
+
+            # Convert pixel coords to OSD grid coords
+            col_l = max(0, min(osd_cols - 2, int(bx / max(1, frame_w) * osd_cols)))
+            row_t = max(0, min(osd_rows - 2, int(by / max(1, frame_h) * osd_rows)))
+            col_r = max(col_l + 2, min(osd_cols - 1, int((bx + bw) / max(1, frame_w) * osd_cols)))
+            row_b = max(row_t + 1, min(osd_rows - 1, int((by + bh) / max(1, frame_h) * osd_rows)))
+
+            # Draw 4 corners of bounding box
+            ser.write(build_msp_displayport_draw(row_t, col_l, "/"))      # Top-Left
+            ser.write(build_msp_displayport_draw(row_t, col_r, "\\"))     # Top-Right
+            ser.write(build_msp_displayport_draw(row_b, col_l, "\\"))     # Bottom-Left
+            ser.write(build_msp_displayport_draw(row_b, col_r, "/"))      # Bottom-Right
+
+            # Draw top/bottom edge markers
+            edge_w = col_r - col_l
+            if edge_w > 3:
+                top_bar = "-" * min(edge_w - 1, 10)
+                ser.write(build_msp_displayport_draw(row_t, col_l + 1, top_bar))
+                ser.write(build_msp_displayport_draw(row_b, col_l + 1, top_bar))
+
+            # Draw target ID label above box
+            if target_id > 0:
+                label = f"TGT#{target_id}"
+            else:
+                label = "TARGET"
+            label_col = max(0, min(osd_cols - len(label), col_l))
+            label_row = max(0, row_t - 1)
+            ser.write(build_msp_displayport_draw(label_row, label_col, label))
+
+        # 4. Draw status bar at bottom
+        if locked and target_id > 0:
+            status = f"LOCK #{target_id} ACTIVE"
+        elif locked:
+            status = "[ TARGET LOCKED ]"
+        else:
+            status = "SCANNING..."
+        status_col = max(0, (osd_cols - len(status)) // 2)
+        ser.write(build_msp_displayport_draw(osd_rows - 1, status_col, status))
+
+        # 5. Flush OSD buffer to display
+        ser.write(build_msp_displayport_draw_screen())
+
+    except Exception:
+        pass
+
+
 def parse_msp_altitude(payload: bytes) -> dict | None:
     """Parse MSP_ALTITUDE (109): Altitude in meters and vario."""
     if len(payload) >= 6:
