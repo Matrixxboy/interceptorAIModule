@@ -133,7 +133,8 @@ class DetectionConfig:
 
 @dataclass
 class TrackerConfig:
-    backend: TrackerBackend = "bytetrack"
+    backend: TrackerBackend = "botsort"
+    track_conf: float = 0.25
     max_age: int = 45
     min_hits: int = 2
     iou_match_threshold: float = 0.25

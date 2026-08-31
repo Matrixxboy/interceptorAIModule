@@ -27,13 +27,13 @@ def main() -> None:
     parser.add_argument(
         "--data",
         type=str,
-        default=str(ROOT / "datasets" / "drone_missile" / "data.yaml"),
+        default=str(ROOT / "datasets" / "drone.v5-1100img.yolov11" / "data.yaml"),
         help="Path to Ultralytics data.yaml",
     )
     parser.add_argument(
         "--base",
         type=str,
-        default="yolov8s.pt",
+        default="yolo11n.pt",
         help="Base pretrained weights",
     )
     parser.add_argument("--epochs", type=int, default=100)

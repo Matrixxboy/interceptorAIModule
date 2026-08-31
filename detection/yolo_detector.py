@@ -1,12 +1,13 @@
 """
 Lightweight OpenCV DNN YOLO detector for 2GB RAM Linux SBCs (Radxa).
 Uses ONNX models to avoid PyTorch overhead.
+Now with native PyTorch (Ultralytics) fallback for PC tracking!
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Sequence
+from typing import Sequence, Any
 import cv2
 import numpy as np
 
@@ -19,8 +20,10 @@ log = setup_logger("cuas.yolo_dnn")
 class YOLODetector:
     def __init__(self, cfg: DetectionConfig | None = None) -> None:
         self.cfg = cfg or CONFIG.detection
+        self.tracker_cfg = CONFIG.tracker
         self._net = None
         self._rknn = None
+        self._pt_model = None
         self._is_rknn = False
         self._device = "cpu"
         self._half = False
@@ -38,18 +41,18 @@ class YOLODetector:
     def _resolve_weights(self) -> tuple[str, bool]:
         MODELS_DIR.mkdir(parents=True, exist_ok=True)
         
-        # 1. Check for single decided RKNN model (Rockchip NPU 0.8 TOPS Acceleration)
-        rknn_path = MODELS_DIR / "yolo11_fast_precision.rknn"
-        if rknn_path.is_file() and rknn_path.stat().st_size > 0:
-            return str(rknn_path.resolve()), True
-
-        # 2. Check for configured model path / name if specified
+        # 1. Check for configured model path / name if specified
         if self.cfg.model_path:
             p = Path(self.cfg.model_path)
             if not p.is_absolute():
                 p = MODELS_DIR / p.name
             if p.is_file() and p.stat().st_size > 0:
                 return str(p.resolve()), p.suffix == ".rknn"
+
+        # 2. Check for single decided RKNN model (Rockchip NPU 0.8 TOPS Acceleration)
+        rknn_path = MODELS_DIR / "yolo11_fast_precision.rknn"
+        if rknn_path.is_file() and rknn_path.stat().st_size > 0:
+            return str(rknn_path.resolve()), True
 
         # 3. Direct single decided ONNX model
         onnx_path = MODELS_DIR / "yolo11_fast_precision.onnx"
@@ -58,6 +61,18 @@ class YOLODetector:
     def _load(self) -> None:
         weights, is_rknn = self._resolve_weights()
         
+        if weights.endswith(".pt"):
+            log.info("Loading Native PyTorch YOLO: %s", weights)
+            try:
+                from ultralytics import YOLO
+                self._pt_model = YOLO(weights)
+                self._device = "cpu"  # Usually PyTorch handles its own device mapping
+                log.info("SUCCESS: PyTorch model loaded for native tracking.")
+                return
+            except ImportError:
+                log.warning("Ultralytics package missing. PyTorch models require ultralytics.")
+                return
+
         if is_rknn or weights.endswith(".rknn"):
             log.info("Attempting to load Rockchip RKNN NPU Model: %s", weights)
             try:
@@ -104,6 +119,10 @@ class YOLODetector:
         return self._names
 
     def detect(self, frame: np.ndarray) -> list[BBox]:
+        if self._pt_model is not None:
+            results = self._pt_model(frame, conf=self.cfg.conf_threshold, verbose=False)
+            return self._parse_ultralytics_results(results[0])
+
         boxes: list[BBox] = []
         imgsz = self.cfg.imgsz
         h, w = frame.shape[:2]
@@ -135,9 +154,45 @@ class YOLODetector:
         return boxes
 
     def track(self, frame: np.ndarray, tracker_yaml: str = "") -> list[BBox]:
+        if self._pt_model is not None:
+            tracker_file = f"{self.tracker_cfg.backend}.yaml"
+            conf = getattr(self.tracker_cfg, "track_conf", self.cfg.conf_threshold)
+            results = self._pt_model.track(
+                frame, 
+                tracker=tracker_file, 
+                persist=True, 
+                conf=conf, 
+                verbose=False
+            )
+            return self._parse_ultralytics_results(results[0])
+
         # Without Ultralytics ByteTrack, fallback to standard detect + manual IDs if needed.
         # The hybrid_tracker uses optical flow/CSRT anyway, so raw detect is sufficient.
         return self.detect(frame)
+
+    def _parse_ultralytics_results(self, result: Any) -> list[BBox]:
+        filtered_boxes: list[BBox] = []
+        if not result.boxes:
+            return filtered_boxes
+            
+        class_filter = set(self.cfg.class_filter) if (self.cfg.mode == "coco" and self.cfg.class_filter) else set()
+        
+        for box in result.boxes:
+            cid = int(box.cls[0].item())
+            if class_filter and cid not in class_filter:
+                continue
+                
+            conf = float(box.conf[0].item())
+            x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+            track_id = int(box.id[0].item()) if box.id is not None else -1
+            label = self._names.get(cid, f"obj_{cid}")
+            
+            filtered_boxes.append(BBox(
+                x1=x1, y1=y1, x2=x2, y2=y2,
+                conf=conf, cls_id=cid, track_id=track_id, label=label
+            ))
+            
+        return sorted(filtered_boxes, key=lambda b: b.conf, reverse=True)
 
     def _parse_outputs(self, output: np.ndarray, frame_w: int, frame_h: int) -> list[BBox]:
         # YOLOv8/11 ONNX output shape: (1, 84, N) -> transpose to (N, 84)

@@ -426,11 +426,13 @@ class HybridYoloLockTracker:
                 dcy = d.y1 + (d.y2 - d.y1) * 0.5
                 dist = float(np.hypot(dcx - tcx, dcy - tcy))
                 
-                # Spatial jump gate: reject any candidate box that jumped more than 1.8x target size
-                if dist > 1.8 * max(20.0, t_diag):
+                # Spatial jump gate: reject any candidate box that jumped more than target size
+                # (Increased minimum search radius to 120px so it can re-acquire fast-moving drones)
+                jump_limit = 2.5 * max(120.0, t_diag)
+                if dist > jump_limit and not (d.conf >= 0.45 and len(dets) == 1):
                     continue
 
-                if iou >= 0.35:
+                if iou >= 0.20 or (d.conf >= 0.45 and len(dets) == 1):
                     hist_sim = self._compare_hist(frame, d)
                     cls_match = 1.2 if (self._cls_id >= 0 and d.cls_id == self._cls_id) else 1.0
                     score = (iou * 0.5 + hist_sim * 0.5) * cls_match
@@ -446,10 +448,14 @@ class HybridYoloLockTracker:
                     yw, yh = float(yolo_xywh[2]), float(yolo_xywh[3])
                     sw, sh = xywh_f[2], xywh_f[3]
                     size_ok = (
-                        0.75 <= (yw / max(1.0, sw)) <= 1.30
-                        and 0.75 <= (yh / max(1.0, sh)) <= 1.30
+                        0.75 <= (yw / max(1.0, sw)) <= 1.50
+                        and 0.75 <= (yh / max(1.0, sh)) <= 1.50
                     )
-                    if best_iou >= 0.45 and best_hist >= 0.60 and size_ok and not self._manual_lock:
+                    # Override strict size/IoU checks if there is exactly 1 highly confident target and we drifted
+                    if (best_box.conf >= 0.45 and len(dets) == 1):
+                        size_ok = True
+
+                    if best_score > 0.45 and best_hist >= 0.60 and size_ok and not self._manual_lock:
                         self._reinit_trackers(frame, yolo_xywh, best_box.label or self._label)
                         xywh_f = (float(yolo_xywh[0]), float(yolo_xywh[1]), yw, yh)
                         xywh = yolo_xywh

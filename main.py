@@ -11,6 +11,55 @@ import numpy as np
 import serial
 import traceback
 from pathlib import Path
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from socketserver import ThreadingMixIn
+
+# Global shared frame for MJPEG streamer
+SHARED_FRAME = None
+FRAME_LOCK = threading.Lock()
+
+class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+    """Handle requests in a separate thread."""
+    pass
+
+class MJPEGRequestHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/video_feed':
+            self.send_response(200)
+            self.send_header('Content-type', 'multipart/x-mixed-replace; boundary=frame')
+            self.end_headers()
+            try:
+                while True:
+                    with FRAME_LOCK:
+                        frame = SHARED_FRAME
+                    if frame is not None:
+                        self.wfile.write(b'--frame\r\n')
+                        self.send_header('Content-Type', 'image/jpeg')
+                        self.send_header('Content-Length', str(len(frame)))
+                        self.end_headers()
+                        self.wfile.write(frame)
+                        self.wfile.write(b'\r\n')
+                    time.sleep(0.05)  # 20 FPS stream
+            except Exception:
+                pass
+        else:
+            self.send_response(200)
+            self.send_header('Content-type', 'text/html')
+            self.end_headers()
+            html = """
+            <html>
+                <head><title>T.R.I.V.E.N.I Live AI Dashboard</title></head>
+                <body style="background-color: black; color: green; text-align: center;">
+                    <h2>T.R.I.V.E.N.I FPV Interceptor - Live Feed</h2>
+                    <img src="/video_feed" style="max-width: 100%; height: auto; border: 2px solid green;" />
+                </body>
+            </html>
+            """
+            self.wfile.write(html.encode('utf-8'))
+
+    def log_message(self, format, *args):
+        return  # Suppress HTTP logging for performance
+
 
 from config import SystemConfig
 from core.state_machine import TargetTrackingStateMachine, TrackingState
@@ -158,7 +207,7 @@ class OnboardTracker:
             except Exception:
                 pass
 
-        # Fallback to standard V4L2 index with MJPG FOURCC
+        # Fallback to standard V4L2 index with MJPG FOURCC (Linux)
         for idx in [cam_idx, 0, 1, 2]:
             self.cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
             if self.cap and self.cap.isOpened():
@@ -171,7 +220,17 @@ class OnboardTracker:
                 print(f"[INFO] Camera initialized via V4L2 on index {idx} ({w}x{h} @ {fps} FPS, Threaded 0ms Buffer).")
                 return
 
-        print("[ERROR] Camera initialization failed across all GStreamer and V4L2 devices.")
+        # Fallback for Windows/Mac testing using default OS backend (DirectShow/AVFoundation)
+        import os
+        if os.name == 'nt':
+            for idx in [cam_idx, 0, 1, 2]:
+                self.cap = cv2.VideoCapture(idx)
+                if self.cap and self.cap.isOpened():
+                    self.cam_reader = ThreadedCameraReader(self.cap)
+                    print(f"[INFO] Camera initialized via default OS backend on index {idx}.")
+                    return
+
+        print("[ERROR] Camera initialization failed across all GStreamer, V4L2, and default devices.")
 
     def draw_osd(self, locked: bool, bbox_xywh=None):
         """Draw target bounding box, crosshair, and status on FPV goggles via MSP DisplayPort over UART2."""
@@ -206,6 +265,15 @@ class OnboardTracker:
 
     def run(self):
         print("[INFO] Onboard tracking daemon started.")
+        
+        # Start the Web Streaming Server in the background
+        try:
+            server = ThreadedHTTPServer(('0.0.0.0', 5000), MJPEGRequestHandler)
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            print("[INFO] Live Video Stream available at http://<radxa-ip>:5000")
+        except Exception as e:
+            print(f"[WARN] Failed to start video streamer: {e}")
+
         if self.show_window:
             print("[INFO] Test Mode: Live Camera Display Window Active.")
             print("       Keyboard Controls: [L] Lock Toggle | [F] Follow Toggle | [R] Reset | [Q/ESC] Quit")
@@ -300,6 +368,10 @@ class OnboardTracker:
                 roll, pitch, yaw, throttle = self.controller.update(
                     best_bbox, w, h, base_throttle=1500
                 )
+                self._last_roll = roll
+                self._last_pitch = pitch
+                self._last_yaw = yaw
+                self._last_throttle = throttle
                 # Send commands to FC, preserving the pilot's AUX switches
                 if self.ser and self.ser.is_open and self.last_channels:
                     rc_payload = make_rc_channels(
@@ -317,53 +389,71 @@ class OnboardTracker:
                 self.last_osd_draw = now
                 self.draw_osd(locked=has_target, bbox_xywh=best_bbox)
 
-            # 7. GUI Display & Keyboard Test Controls
-            if self.show_window:
-                vis_frame = frame
+            # 7. GUI Display & Stream Rendering
+            vis_frame = frame.copy()
 
-                # Draw Center Crosshair
-                cv2.drawMarker(vis_frame, (cx_ref, cy_ref), (255, 255, 255), cv2.MARKER_CROSS, 24, 2)
+            # Draw Center Crosshair
+            cv2.drawMarker(vis_frame, (cx_ref, cy_ref), (255, 255, 255), cv2.MARKER_CROSS, 24, 2)
 
-                # Draw ALL Candidate Boxes (Yellow/Cyan)
-                for cand in candidate_boxes:
-                    cv2.rectangle(vis_frame, (cand.x1, cand.y1), (cand.x2, cand.y2), (0, 255, 255), 1)
-                    conf_pct = int(cand.conf * 100)
-                    cv2.putText(vis_frame, f"{cand.label} {conf_pct}%", (cand.x1, max(15, cand.y1 - 5)),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
+            # Draw ALL Candidate Boxes (Yellow/Cyan)
+            for cand in candidate_boxes:
+                cv2.rectangle(vis_frame, (cand.x1, cand.y1), (cand.x2, cand.y2), (0, 255, 255), 1)
+                conf_pct = int(cand.conf * 100)
+                cv2.putText(vis_frame, f"{cand.label} {conf_pct}%", (cand.x1, max(15, cand.y1 - 5)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
 
-                # Draw LOCKED Target Box & Guidance Vector (Green / Red)
-                if has_target and best_bbox:
-                    bx, by, bw, bh = best_bbox
-                    tcx, tcy = bx + bw // 2, by + bh // 2
-                    color = (0, 255, 0) if current_state == TrackingState.FOLLOWING else (0, 255, 255)
-                    tid = getattr(self.hybrid_tracker, "target_id", 1)
-                    
-                    # Highlight locked box with thick border
-                    cv2.rectangle(vis_frame, (bx, by), (bx + bw, by + bh), color, 3)
-                    # Center dot on locked target
-                    cv2.circle(vis_frame, (tcx, tcy), 6, (0, 0, 255), -1)
-                    # Vector line connecting screen center crosshair to target center
-                    cv2.line(vis_frame, (cx_ref, cy_ref), (tcx, tcy), (0, 0, 255), 2)
-                    
-                    # Offset & Target ID text
-                    dx, dy = tcx - cx_ref, tcy - cy_ref
-                    cv2.putText(vis_frame, f"[ TARGET #{tid} ] dx:{dx} dy:{dy}", (bx, max(25, by - 8)),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
-
-                # Top HUD Banner (Config Channels Mapping Display)
-                lock_ch_num = self.cfg.rc_control.lock_channel + 1
-                follow_ch_num = self.cfg.rc_control.follow_channel + 1
-                state_str = str(current_state).replace("TrackingState.", "")
+            # Draw LOCKED Target Box & Guidance Vector (Green / Cyan)
+            if has_target and best_bbox:
+                bx, by, bw, bh = best_bbox
+                tcx, tcy = bx + bw // 2, by + bh // 2
+                color = (0, 255, 0) if current_state == TrackingState.FOLLOWING else (255, 255, 0)
+                tid = getattr(self.hybrid_tracker, "target_id", 1)
                 
-                hud_top = f"STATE: {state_str} | FPS: {self.fps_counter:.1f} | CH{lock_ch_num} LOCK: {'ON' if lock_sw else 'OFF'} | CH{follow_ch_num} FOLLOW: {'ON' if follow_sw else 'OFF'}"
-                cv2.rectangle(vis_frame, (0, 0), (fw, 36), (0, 0, 0), -1)
-                cv2.putText(vis_frame, hud_top, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2)
+                # Highlight locked box with thick border
+                cv2.rectangle(vis_frame, (bx, by), (bx + bw, by + bh), color, 3)
+                # Center dot on locked target
+                cv2.circle(vis_frame, (tcx, tcy), 6, (0, 0, 255), -1)
+                # Vector line connecting screen center crosshair to target center
+                cv2.line(vis_frame, (cx_ref, cy_ref), (tcx, tcy), (0, 0, 255), 2)
+                
+                # Offset & Target ID text
+                dx, dy = tcx - cx_ref, tcy - cy_ref
+                cv2.putText(vis_frame, f"[ TARGET #{tid} ] dx:{dx} dy:{dy}", (bx, max(25, by - 8)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
+                
+                # Display Live Flight Control Commands
+                if current_state == TrackingState.FOLLOWING:
+                    rc_roll = getattr(self, "_last_roll", 1500)
+                    rc_pitch = getattr(self, "_last_pitch", 1500)
+                    rc_yaw = getattr(self, "_last_yaw", 1500)
+                    rc_throttle = getattr(self, "_last_throttle", 1500)
+                    
+                    cmd_text = f"CMD -> YAW:{rc_yaw}  PITCH:{rc_pitch}  ROLL:{rc_roll}  THR:{rc_throttle}"
+                    cv2.putText(vis_frame, cmd_text, (bx, by + bh + 25),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.60, (0, 0, 255), 2)
 
-                # Bottom Controls Help Bar
-                hud_bot = f"[L] Toggle CH{lock_ch_num} Lock  |  [F] Toggle CH{follow_ch_num} Follow  |  [R] Reset  |  [Q/ESC] Quit"
-                cv2.rectangle(vis_frame, (0, fh - 30), (fw, fh), (0, 0, 0), -1)
-                cv2.putText(vis_frame, hud_bot, (10, fh - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 255), 1)
+            # Top HUD Banner (Config Channels Mapping Display)
+            lock_ch_num = self.cfg.rc_control.lock_channel + 1
+            follow_ch_num = self.cfg.rc_control.follow_channel + 1
+            state_str = str(current_state).replace("TrackingState.", "")
+            
+            hud_top = f"STATE: {state_str} | FPS: {self.fps_counter:.1f} | CH{lock_ch_num} LOCK: {'ON' if lock_sw else 'OFF'} | CH{follow_ch_num} FOLLOW: {'ON' if follow_sw else 'OFF'}"
+            cv2.rectangle(vis_frame, (0, 0), (fw, 36), (0, 0, 0), -1)
+            cv2.putText(vis_frame, hud_top, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2)
 
+            # Bottom Controls Help Bar
+            hud_bot = f"[L] Toggle CH{lock_ch_num} Lock  |  [F] Toggle CH{follow_ch_num} Follow  |  [R] Reset  |  [Q/ESC] Quit"
+            cv2.rectangle(vis_frame, (0, fh - 30), (fw, fh), (0, 0, 0), -1)
+            cv2.putText(vis_frame, hud_bot, (10, fh - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 255), 1)
+
+            # 8. Encode frame for Web Streamer
+            global SHARED_FRAME
+            ret, buffer = cv2.imencode('.jpg', vis_frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+            if ret:
+                with FRAME_LOCK:
+                    SHARED_FRAME = buffer.tobytes()
+
+            if self.show_window:
                 cv2.imshow("FPV Interceptor - Live Camera Feed (Test Mode)", vis_frame)
 
                 # Handle Keyboard Inputs
@@ -398,7 +488,7 @@ class OnboardTracker:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="config.json", help="Path to centralized configuration JSON")
-    parser.add_argument("--show", action="store_true", default=True, help="Display live camera window with HUD and keyboard test controls")
+    parser.add_argument("--show", action="store_true", default=False, help="Display live camera window with HUD and keyboard test controls")
     args = parser.parse_args()
     
     try:

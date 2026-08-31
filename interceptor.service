@@ -7,12 +7,12 @@ Wants=network-online.target
 Type=simple
 User=radxa
 WorkingDirectory=/home/radxa/interceptorAIModule
-ExecStart=/usr/bin/python3 main.py --config config.json
+Environment="PATH=/home/radxa/interceptorAIModule/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ExecStart=/home/radxa/interceptorAIModule/.venv/bin/python main.py --config config.json
 Restart=always
 RestartSec=3
 StandardOutput=journal
 StandardError=journal
-Nice=-10
 
 [Install]
 WantedBy=multi-user.target
