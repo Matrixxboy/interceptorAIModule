@@ -89,6 +89,7 @@ class HybridYoloLockTracker:
         self._last_dets: list[BBox] = []
         self._manual_lock = False
         self._detector_error: str | None = None
+        self._vx, self._vy = 0.0, 0.0
 
     def ensure_detector(self) -> YOLODetector:
         if self._detector_error is not None:
@@ -128,6 +129,7 @@ class HybridYoloLockTracker:
         self._lost = 0
         self._frame_i = 0
         self._manual_lock = False
+        self._vx, self._vy = 0.0, 0.0
 
     def detect_only(self, frame: np.ndarray) -> list[BBox]:
         dets = self.ensure_detector().detect(frame)
@@ -380,6 +382,9 @@ class HybridYoloLockTracker:
                         self._manual_lock = False
 
         if target_ok and xywh_f is not None:
+            if self._bbox_f is not None:
+                self._vx = xywh_f[0] - self._bbox_f[0]
+                self._vy = xywh_f[1] - self._bbox_f[1]
             out = self._set_bbox(xywh_f)
             # Keep pixel engine bbox in sync so flow assist stays coherent
             if hasattr(self.pixel_engine, "bbox_xywh"):
@@ -389,6 +394,10 @@ class HybridYoloLockTracker:
 
         self._lost += 1
         if self._lost <= self.max_hold_frames and self._bbox is not None:
+            if self._bbox_f is not None:
+                nx = self._bbox_f[0] + self._vx
+                ny = self._bbox_f[1] + self._vy
+                self._set_bbox((nx, ny, self._bbox_f[2], self._bbox_f[3]))
             return HybridResult(True, self._bbox, "hold", self._label, self._conf * 0.85, dets)
 
         self._locked = False

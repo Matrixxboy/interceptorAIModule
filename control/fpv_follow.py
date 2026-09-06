@@ -1,15 +1,28 @@
-"""FPV visual-servo follow controller supporting 4-axis control (Yaw, Altitude/Pitch, Distance, Roll)."""
+"""FPV visual-servo interceptor controller — 4-axis (Yaw, Altitude/Pitch, Distance, Roll).
+
+This controller steers the drone towards the predicted interception point of a
+moving target using:
+  1.  A 3D Kalman filter (position + velocity + acceleration in world frame).
+  2.  A 3D quadratic interception solver (time-to-impact & collision point).
+  3.  Pure Proportional Navigation (PPN) for commanded acceleration.
+  4.  Existing PID loops for yaw & altitude stabilization.
+"""
 
 from __future__ import annotations
 
+import math
 import time
+import numpy as np
 from dataclasses import dataclass
 
 from config import SystemConfig
 from control.pid_controller import PIDController
 from estimation.distance_estimator import DistanceEstimate, DistanceEstimator
 from tracking.motion_predictor import MotionPredictor, TrajectoryEstimate
-from vision.camera_geometry import TargetBearing, solve_bearing
+from tracking.interception_calc import InterceptionCalculator
+from tracking.kalman_filter_3d import KalmanFilter3D
+from tracking.ppn_guidance import PPNGuidance
+from vision.camera_geometry import TargetBearing, solve_bearing, pixel_to_world, world_to_pixel
 
 
 def clamp(val: float, lo: float, hi: float) -> float:
@@ -72,6 +85,21 @@ class FPVFollowController:
         self.distance_estimator = DistanceEstimator(self.sys_cfg.distance)
         self.motion_predictor = MotionPredictor(self.sys_cfg.prediction)
 
+        # Interceptor speed in m/s (derived from px/s config ÷ 100 as approximation)
+        self._interceptor_speed_ms = getattr(
+            self.sys_cfg.prediction, "interceptor_speed_px_s", 1200.0
+        ) / 100.0
+        self.interception_calc = InterceptionCalculator(
+            interceptor_speed=self._interceptor_speed_ms
+        )
+
+        # 3D world-frame tracker + PPN guidance
+        # High r_pos dampens noisy depth estimates; low q_acc prevents false acceleration
+        self.kalman_3d = KalmanFilter3D(
+            q_pos=1e-2, q_vel=5e-2, q_acc=0.5, r_pos=5.0
+        )
+        self.ppn = PPNGuidance(N_p=3.0, b=self._interceptor_speed_ms, C_b=1.0)
+
         # Live airframe attitude (only used when camera stabilization is enabled)
         self.vehicle_roll_deg = 0.0
         self.vehicle_pitch_deg = 0.0
@@ -84,6 +112,11 @@ class FPVFollowController:
         self.altitude_pid.update_config(sys_cfg.altitude_pid)
         self.distance_estimator.update_config(sys_cfg.distance)
         self.motion_predictor.update_config(sys_cfg.prediction)
+        self._interceptor_speed_ms = getattr(
+            sys_cfg.prediction, "interceptor_speed_px_s", 1200.0
+        ) / 100.0
+        self.interception_calc.interceptor_speed = self._interceptor_speed_ms
+        self.ppn.b = self._interceptor_speed_ms
         self.cfg.deadzone_norm = sys_cfg.offsets.deadzone_norm
         self.cfg.lead_s = sys_cfg.prediction.lead_time_s
 
@@ -93,6 +126,7 @@ class FPVFollowController:
         self.altitude_pid.reset()
         self.distance_estimator.reset()
         self.motion_predictor.reset()
+        self.ppn.reset()
 
         self._cmd_roll = float(c.rc_mid)
         self._cmd_pitch = float(c.rc_mid)
@@ -100,9 +134,18 @@ class FPVFollowController:
         self._cmd_throttle = 1500.0
         self._t: float | None = None
 
+        # --- Exposed state for HUD ---
         self.last_trajectory: TrajectoryEstimate | None = None
         self.last_distance: DistanceEstimate | None = None
         self.last_bearing: TargetBearing | None = None
+        self.last_intercept_pt: tuple[float, float] | None = None
+        self.last_intercept_3d: tuple[float, float, float] | None = None
+        self.last_t_intercept: float | None = None
+        self.last_kalman_3d_pos: tuple[float, float, float] | None = None
+        self.last_kalman_3d_vel: tuple[float, float, float] | None = None
+        self.last_a_P: np.ndarray | None = None
+        self.last_v_P: np.ndarray | None = None
+        self.last_closing_rate: float = 0.0
 
     def set_vehicle_attitude(self, roll_deg: float, pitch_deg: float) -> None:
         """Feed FC attitude so a fixed camera can be levelled against gravity."""
@@ -139,8 +182,9 @@ class FPVFollowController:
             size_src = (0.0, 0.0, 50.0, 50.0)
         axis = getattr(self.sys_cfg.distance, "size_axis", "width") or "width"
         size_px = bbox_size_px(size_src, axis)
+        slant_m = self.distance_estimator.estimate_distance(size_px)
 
-        # Steer to the LOCK BOX CENTER only (no Kalman lead / green aim point)
+        # ── Current target pixel centre ──
         if bbox_xywh is not None:
             box_cx = float(bbox_xywh[0]) + float(bbox_xywh[2]) * 0.5
             box_cy = float(bbox_xywh[1]) + float(bbox_xywh[3]) * 0.5
@@ -149,17 +193,98 @@ class FPVFollowController:
             box_cx = sb[0] + sb[2] * 0.5
             box_cy = sb[1] + sb[3] * 0.5
 
-        # Mount-corrected bearing: works for a camera at any tilt / roll / yaw.
-        # The pinhole size gives a line-of-sight range, so resolve it against the
-        # true elevation before regulating follow distance.
-        slant_m = self.distance_estimator.estimate_distance(size_px)
+        # ── 3D Kalman Filter ──
+        p_w_t_raw = pixel_to_world(
+            box_cx, box_cy, slant_m, frame_w, frame_h,
+            self.sys_cfg.camera, self.vehicle_roll_deg, self.vehicle_pitch_deg, 0.0,
+            self.sys_cfg.distance.focal_length_px,
+        )
+
+        if bbox_xywh is not None:
+            p_w_t = self.kalman_3d.update(p_w_t_raw)
+        else:
+            p_w_t = self.kalman_3d.predict(dt)
+
+        v_w_t = self.kalman_3d.get_velocity()
+        self.last_kalman_3d_pos = p_w_t
+        self.last_kalman_3d_vel = v_w_t
+
+        # Velocity confidence: only trust the 3D velocity when it's been
+        # consistent for several frames. Low-confidence = don't let PPN fight the PID.
+        tgt_speed = math.sqrt(v_w_t[0]**2 + v_w_t[1]**2 + v_w_t[2]**2)
+        vel_confident = tgt_speed > 0.3 and self.kalman_3d.initialized
+
+        # ── 3D Interception point (quadratic solver) ──
+        if vel_confident:
+            intercept_3d, t_int = self.interception_calc.calculate_interception_3d(
+                p_w_t, v_w_t, interceptor_speed_ms=self._interceptor_speed_ms,
+            )
+        else:
+            intercept_3d, t_int = None, None
+
+        if intercept_3d is not None:
+            self.last_intercept_3d = intercept_3d
+            self.last_t_intercept = t_int
+        else:
+            self.last_intercept_3d = p_w_t
+            self.last_t_intercept = None
+            intercept_3d = p_w_t
+
+        # ── PPN Guidance (only when velocity is trusted) ──
+        ppn_active = vel_confident
+        if ppn_active:
+            if self.last_v_P is not None:
+                v_w_I = (float(self.last_v_P[0]),
+                         float(self.last_v_P[1]),
+                         float(self.last_v_P[2]))
+            else:
+                r = np.array(p_w_t)
+                r_norm = float(np.linalg.norm(r))
+                if r_norm > 1e-3:
+                    r_hat = r / r_norm
+                    v_w_I = tuple(float(x) for x in r_hat * self._interceptor_speed_ms)
+                else:
+                    v_w_I = (1.0, 0.0, 0.0)
+
+            a_P, v_P, psi_ref = self.ppn.compute_guidance(p_w_t, v_w_t, v_w_I, dt)
+            self.last_a_P = a_P
+            self.last_v_P = v_P
+        else:
+            a_P = np.zeros(3)
+            self.last_a_P = a_P
+            # Reset PPN state when not confident so it doesn't accumulate stale velocity
+            self.ppn.reset()
+            self.last_v_P = None
+
+        # Closing rate
+        r_vec = np.array(p_w_t)
+        r_norm = float(np.linalg.norm(r_vec))
+        if r_norm > 1e-3 and self.last_v_P is not None:
+            r_hat = r_vec / r_norm
+            v_rel = np.array(v_w_t) - np.array(
+                (float(self.last_v_P[0]), float(self.last_v_P[1]), float(self.last_v_P[2]))
+            ) if self.last_v_P is not None else np.array(v_w_t)
+            self.last_closing_rate = -float(np.dot(v_rel, r_hat))
+        else:
+            self.last_closing_rate = 0.0
+
+        # ── Project intercept point to 2D for HUD only ──
+        intercept_pixel = world_to_pixel(
+            intercept_3d, frame_w, frame_h,
+            self.sys_cfg.camera, self.vehicle_roll_deg, self.vehicle_pitch_deg, 0.0,
+            self.sys_cfg.distance.focal_length_px,
+        )
+        if intercept_pixel is not None:
+            self.last_intercept_pt = (intercept_pixel[0], intercept_pixel[1])
+        else:
+            self.last_intercept_pt = None
+
+        # ═══════════════════════════════════════════════════════════════════
+        # PID ALWAYS STEERS TOWARD THE REAL TARGET — never the intercept pt
+        # ═══════════════════════════════════════════════════════════════════
         bearing = solve_bearing(
-            box_cx,
-            box_cy,
-            frame_w,
-            frame_h,
-            self.sys_cfg.camera,
-            self.sys_cfg.offsets,
+            box_cx, box_cy, frame_w, frame_h,
+            self.sys_cfg.camera, self.sys_cfg.offsets,
             slant_m=slant_m,
             vehicle_roll_deg=self.vehicle_roll_deg,
             vehicle_pitch_deg=self.vehicle_pitch_deg,
@@ -168,40 +293,41 @@ class FPVFollowController:
         self.last_bearing = bearing
 
         dist_est = self.distance_estimator.compute_following_control(
-            size_px, dt, distance_m=bearing.ground_m
+            size_px, dt, distance_m=bearing.ground_m,
         )
         self.last_distance = dist_est
 
         nx = bearing.nx
         ny = bearing.ny
 
-        # PID calculations:
-        # yaw_pid controls horizontal error nx (left/right yaw rotation)
+        # ── PID ──
         yaw_res = self.yaw_pid.update(nx, dt, deadzone=c.deadzone_norm, expo=c.expo)
-
-        # altitude_pid controls vertical error ny (climb / descend throttle response)
         alt_res = self.altitude_pid.update(ny, dt, deadzone=c.deadzone_norm, expo=c.expo)
 
-        # Global gentleness scale — yaw / throttle stay mild; pitch has its own scale
         speed_scale = clamp(float(getattr(self.sys_cfg.safety, "follow_speed_scale", 0.50)), 0.05, 1.0)
         pitch_scale = clamp(float(getattr(self.sys_cfg.safety, "follow_pitch_scale", 0.90)), 0.05, 1.5)
 
-        # Yaw: nx > 0 (target is right) -> yaw right (+offset)
+        # ── PPN correction (ADDITIVE only, never replaces PID) ──
+        ppn_gain = 30.0  # µs per (m/s²) — conservative to not overpower PID
+        ppn_pitch    = float(a_P[0]) * pitch_scale * ppn_gain
+        ppn_roll     = float(a_P[1]) * pitch_scale * ppn_gain
+        ppn_throttle = -float(a_P[2]) * speed_scale * ppn_gain
+
+        # Yaw: PID drives yaw toward the real target center
         yaw_off = c.yaw_dir * yaw_res.output * speed_scale
 
-        # Pitch: target smaller/farther -> pitch forward, closer -> pitch backward
-        raw_pitch = float(dist_est.recommended_pitch_offset) * pitch_scale
-        # Respect per-direction caps from safety config
+        # Pitch: distance PID + PPN forward/backward correction
+        raw_pitch = float(dist_est.recommended_pitch_offset) * pitch_scale + ppn_pitch
         fwd_cap = float(getattr(self.sys_cfg.safety, "max_forward_speed", 350.0))
         back_cap = float(getattr(self.sys_cfg.safety, "max_backward_speed", 250.0))
         raw_pitch = clamp(raw_pitch, -back_cap, fwd_cap)
         pitch_off = c.pitch_dir * raw_pitch
 
-        # Throttle: ny < 0 (target is higher than center) -> increase throttle to climb
-        # ny > 0 (target is lower than center) -> decrease throttle to descend
-        throttle_off = -alt_res.output * speed_scale
+        # Throttle: altitude PID + PPN vertical correction
+        throttle_off = -alt_res.output * speed_scale + ppn_throttle
 
-        roll_off = 0.0
+        # Roll: PPN lateral correction only
+        roll_off = ppn_roll
 
         target_yaw = c.rc_mid + yaw_off
         target_pitch = c.rc_mid + pitch_off

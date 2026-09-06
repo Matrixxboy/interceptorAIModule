@@ -253,3 +253,100 @@ def level_reference_line(
     ang = clamp(math.radians(tilt) - el_target, -1.45, 1.45)
     row = frame_h * 0.5 + fy * math.tan(ang)
     return int(round(row)), -roll
+
+
+def pixel_to_world(
+    u: float,
+    v: float,
+    slant_m: float,
+    frame_w: int,
+    frame_h: int,
+    cam_cfg,
+    vehicle_roll_deg: float = 0.0,
+    vehicle_pitch_deg: float = 0.0,
+    vehicle_yaw_deg: float = 0.0,
+    calibrated_focal_px: float | None = None,
+) -> Vec3:
+    """Converts a pixel (u,v) and depth to a 3D point in the world frame relative to the drone."""
+    fx, fy = resolve_focal_px(cam_cfg, frame_w, frame_h, calibrated_focal_px)
+    cx, cy = frame_w * 0.5, frame_h * 0.5
+
+    # Pixel to normalized image plane
+    x_n = (u - cx) / fx
+    y_n = (v - cy) / fy
+
+    # Calculate z_c from slant_m
+    z_c = slant_m / math.sqrt(x_n**2 + y_n**2 + 1.0)
+    pt_cam = (x_n * z_c, y_n * z_c, z_c)
+
+    # 1) Undo camera mount rotation (Z, Y, X in reverse or forward)
+    # The existing solve_bearing does: ray_body = _rot_z(_rot_y(ray, pitch), yaw)
+    mount_pitch = math.radians(float(getattr(cam_cfg, "mount_pitch_deg", 0.0)))
+    mount_yaw = math.radians(float(getattr(cam_cfg, "mount_yaw_deg", 0.0)))
+    mount_roll = math.radians(float(getattr(cam_cfg, "mount_roll_deg", 0.0)))
+
+    # In solve_bearing, body -> camera rotation is conceptually ray -> body. 
+    # For a point in camera frame, we first undo roll, then pitch, then yaw.
+    x_c, y_c, z_c = pt_cam
+    if abs(mount_roll) > 1e-6:
+        cr, sr = math.cos(mount_roll), math.sin(mount_roll)
+        x_c, y_c = x_c * cr - y_c * sr, x_c * sr + y_c * cr
+    pt_body_aligned = (z_c, x_c, y_c)  # Camera +Z is Body +X, Camera +X is Body +Y, Camera +Y is Body +Z
+
+    pt_body = _rot_z(_rot_y(pt_body_aligned, mount_pitch), mount_yaw)
+
+    # 2) Undo vehicle attitude to get world frame
+    v_roll = math.radians(float(vehicle_roll_deg))
+    v_pitch = math.radians(float(vehicle_pitch_deg))
+    v_yaw = math.radians(float(vehicle_yaw_deg))
+
+    pt_world = _rot_z(_rot_y(_rot_x(pt_body, v_roll), v_pitch), v_yaw)
+    return pt_world
+
+
+def world_to_pixel(
+    pw: Vec3,
+    frame_w: int,
+    frame_h: int,
+    cam_cfg,
+    vehicle_roll_deg: float = 0.0,
+    vehicle_pitch_deg: float = 0.0,
+    vehicle_yaw_deg: float = 0.0,
+    calibrated_focal_px: float | None = None,
+) -> tuple[float, float, float] | None:
+    """Converts a 3D point in the world frame back to pixel coordinates (u,v) and depth."""
+    fx, fy = resolve_focal_px(cam_cfg, frame_w, frame_h, calibrated_focal_px)
+    cx, cy = frame_w * 0.5, frame_h * 0.5
+
+    # 1) Apply vehicle attitude (inverse)
+    v_roll = math.radians(float(vehicle_roll_deg))
+    v_pitch = math.radians(float(vehicle_pitch_deg))
+    v_yaw = math.radians(float(vehicle_yaw_deg))
+
+    # Inverse rotations: -yaw, -pitch, -roll
+    pt_body = _rot_x(_rot_y(_rot_z(pw, -v_yaw), -v_pitch), -v_roll)
+
+    # 2) Apply camera mount (inverse)
+    mount_pitch = math.radians(float(getattr(cam_cfg, "mount_pitch_deg", 0.0)))
+    mount_yaw = math.radians(float(getattr(cam_cfg, "mount_yaw_deg", 0.0)))
+    mount_roll = math.radians(float(getattr(cam_cfg, "mount_roll_deg", 0.0)))
+
+    pt_body_aligned = _rot_y(_rot_z(pt_body, -mount_yaw), -mount_pitch)
+
+    # Body to Camera
+    x_c, y_c, z_c = pt_body_aligned[1], pt_body_aligned[2], pt_body_aligned[0]
+
+    if abs(mount_roll) > 1e-6:
+        cr, sr = math.cos(-mount_roll), math.sin(-mount_roll)
+        x_c, y_c = x_c * cr - y_c * sr, x_c * sr + y_c * cr
+
+    if z_c <= 1e-6:
+        return None  # Behind the camera
+
+    # Camera to Pixel
+    u = (x_c / z_c) * fx + cx
+    v = (y_c / z_c) * fy + cy
+    slant_m = math.sqrt(x_c**2 + y_c**2 + z_c**2)
+
+    return u, v, slant_m
+

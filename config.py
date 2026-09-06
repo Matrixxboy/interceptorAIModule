@@ -58,6 +58,7 @@ class PredictionConfig:
     measurement_noise_r: float = 1e-1
     lead_time_s: float = 0.12  # Seconds of lead trajectory prediction
     smoothing_factor: float = 0.45
+    interceptor_speed_px_s: float = 1200.0  # Speed of the interceptor for target interception calc
 
 
 @dataclass
@@ -106,8 +107,8 @@ class CameraConfig:
 @dataclass
 class DetectionConfig:
     mode: DetectionMode = "coco"
-    model_name: str = "yolov8n.pt"
-    model_path: Path = field(default_factory=lambda: MODELS_DIR / "yolov8n.pt")
+    model_name: str = "yolo11n.pt"
+    model_path: Path = field(default_factory=lambda: MODELS_DIR / "yolo11n.pt")
     custom_weights: Path = field(
         default_factory=lambda: MODELS_DIR / "drone_missile_best.pt"
     )

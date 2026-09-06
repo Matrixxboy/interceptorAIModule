@@ -119,6 +119,7 @@ class TrackingWorkerThread(QThread):
 
     def arm_drone(self) -> bool:
         self.gui_arm_requested = True
+        self.force_disarm = False
         self.arm_requested = True
         self.sys_log.log(LogCategory.DRONE, "ARM requested (GUI)", module="Manual Control")
         return True
@@ -126,8 +127,9 @@ class TrackingWorkerThread(QThread):
     def disarm_drone(self) -> bool:
         self.gui_arm_requested = False
         self.arm_requested = False
+        self.force_disarm = True
         self.throttle_value = 1000  # Reset throttle to safety min on disarm
-        self.sys_log.log(LogCategory.DRONE, "DISARM requested (Throttle reset to 1000)", module="Manual Control")
+        self.sys_log.log(LogCategory.DRONE, "DISARM requested (GUI Override) - Throttle reset to 1000", module="Manual Control")
         return False
 
     @property
@@ -318,6 +320,15 @@ class TrackingWorkerThread(QThread):
         self.requested_cam_idx = None
 
         self.sys_log.log(LogCategory.SYSTEM, "Tracking pipeline started", module="Worker")
+        
+        # Load YOLO model into VRAM on startup so the first lock is instant
+        try:
+            self.sys_log.log(LogCategory.SYSTEM, "Pre-loading YOLO weights into VRAM...", module="Worker")
+            self.hybrid.ensure_detector()
+            self.sys_log.log(LogCategory.SYSTEM, "YOLO loaded into memory successfully.", module="Worker")
+        except Exception as e:
+            self.sys_log.log(LogCategory.SYSTEM, f"Failed to pre-load YOLO: {e}", severity=LogSeverity.ERROR, module="Worker")
+
         last_time = time.time()
         last_msp_send = 0.0
         msp_interval = 1.0 / 50.0
@@ -531,8 +542,14 @@ class TrackingWorkerThread(QThread):
                     if arm_ch not in channel_overrides and arm_pwm is not None:
                         channel_overrides[arm_ch] = int(arm_pwm)
 
-                    # Remote OR GUI can arm; both must be off to disarm
-                    self.arm_requested = bool(self.gui_arm_requested or joy_wants_arm)
+                    # Remote OR GUI can arm; but GUI explicit disarm overrides remote
+                    if getattr(self, "force_disarm", False):
+                        self.arm_requested = False
+                        if not joy_wants_arm:
+                            # Reset the override once the physical switch is flipped off
+                            self.force_disarm = False
+                    else:
+                        self.arm_requested = bool(self.gui_arm_requested or joy_wants_arm)
 
                     # Mode switch → flight mode
                     mode_ch = int(self.sys_config.aux_channels.mode_channel)
@@ -719,14 +736,15 @@ class TrackingWorkerThread(QThread):
         h: int,
     ) -> None:
         cx, cy = w // 2, h // 2
+
+        # ── Crosshair ──
         cv2.drawMarker(frame, (cx, cy), (255, 255, 255), cv2.MARKER_CROSS, 30, 2)
 
         dz_px_x = int(w * 0.5 * self.sys_config.offsets.deadzone_norm)
         dz_px_y = int(h * 0.5 * self.sys_config.offsets.deadzone_norm)
         cv2.rectangle(frame, (cx - dz_px_x, cy - dz_px_y), (cx + dz_px_x, cy + dz_px_y), (255, 255, 0), 1)
 
-        # Aim reference: the row the drone actually flies the target onto. With a
-        # tilted camera this sits away from the image centre, which is the point.
+        # ── Aim reference line ──
         cam = self.sys_config.camera
         mount_active = (
             abs(cam.mount_pitch_deg) > 0.5
@@ -736,10 +754,7 @@ class TrackingWorkerThread(QThread):
         )
         if mount_active and str(getattr(cam, "vertical_ref", "level")).startswith("level"):
             row, tilt_deg = level_reference_line(
-                w,
-                h,
-                cam,
-                self.sys_config.offsets,
+                w, h, cam, self.sys_config.offsets,
                 vehicle_roll_deg=self.controller.vehicle_roll_deg,
                 vehicle_pitch_deg=self.controller.vehicle_pitch_deg,
                 calibrated_focal_px=self.sys_config.distance.focal_length_px,
@@ -755,124 +770,203 @@ class TrackingWorkerThread(QThread):
                     f"AIM {cam.desired_elevation_deg:+.0f}deg  TILT {cam.mount_pitch_deg:+.0f}deg"
                     + ("  LVL" if cam.stabilize_with_attitude else ""),
                     (cx - half_span, max(14, min(h - 6, int(row) - 8))),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.45,
-                    (0, 200, 255),
-                    1,
-                    cv2.LINE_AA,
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 200, 255), 1, cv2.LINE_AA,
                 )
 
+        # ── Interceptor telemetry (always visible) ──
+        ctrl = self.controller
+        tti_text = "---"
+        closing_rate = 0.0
+        tgt_speed = 0.0
+
+        if hasattr(ctrl, "last_t_intercept") and ctrl.last_t_intercept is not None:
+            tti_text = f"{ctrl.last_t_intercept:.1f}s"
+        if hasattr(ctrl, "last_closing_rate"):
+            closing_rate = ctrl.last_closing_rate
+        if hasattr(ctrl, "last_kalman_3d_vel") and ctrl.last_kalman_3d_vel is not None:
+            vt = ctrl.last_kalman_3d_vel
+            tgt_speed = math.sqrt(vt[0]**2 + vt[1]**2 + vt[2]**2)
+
+        # ═══════════════════════════════════════════════════════
+        # RIGHT-SIDE INTERCEPTOR GAUGE (Closing Rate Scale)
+        # ═══════════════════════════════════════════════════════
+        gauge_x = w - 45          # X position of gauge bar
+        gauge_top = 80            # Top of gauge
+        gauge_bot = h - 100       # Bottom of gauge
+        gauge_h = gauge_bot - gauge_top
+        gauge_w = 18              # Width of gauge bar
+
+        # Gauge background
+        cv2.rectangle(frame, (gauge_x, gauge_top), (gauge_x + gauge_w, gauge_bot), (40, 40, 40), -1)
+        cv2.rectangle(frame, (gauge_x, gauge_top), (gauge_x + gauge_w, gauge_bot), (120, 120, 120), 1)
+
+        # Fill level based on closing rate (0..20 m/s mapped to 0..1)
+        max_closing = 20.0
+        fill_frac = max(0.0, min(1.0, closing_rate / max_closing))
+        fill_h = int(gauge_h * fill_frac)
+        if fill_h > 0:
+            # Color: green when closing, red when opening
+            if closing_rate > 0:
+                bar_color = (0, 220, 80)
+            else:
+                bar_color = (0, 0, 220)
+            cv2.rectangle(
+                frame,
+                (gauge_x + 1, gauge_bot - fill_h),
+                (gauge_x + gauge_w - 1, gauge_bot),
+                bar_color, -1,
+            )
+
+        # Tick marks every 5 m/s
+        for tick_val in range(0, int(max_closing) + 1, 5):
+            tick_y = gauge_bot - int(gauge_h * tick_val / max_closing)
+            cv2.line(frame, (gauge_x - 4, tick_y), (gauge_x, tick_y), (180, 180, 180), 1)
+            cv2.putText(frame, str(tick_val), (gauge_x - 28, tick_y + 4),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.32, (180, 180, 180), 1, cv2.LINE_AA)
+
+        # Gauge label
+        cv2.putText(frame, "CLR", (gauge_x - 2, gauge_top - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, (180, 220, 255), 1, cv2.LINE_AA)
+        cv2.putText(frame, "m/s", (gauge_x - 4, gauge_bot + 16),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.32, (140, 140, 140), 1, cv2.LINE_AA)
+
+        # ═══════════════════════════════════════════════════════
+        # TOP-RIGHT INTERCEPTOR INFO BLOCK
+        # ═══════════════════════════════════════════════════════
+        info_x = w - 220
+        info_y = 28
+        line_h = 22
+
+        cv2.putText(frame, "INTERCEPTOR", (info_x, info_y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 200, 255), 2, cv2.LINE_AA)
+        info_y += line_h + 4
+
+        cv2.putText(frame, f"TTI: {tti_text}", (info_x, info_y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.50,
+                    (0, 255, 255) if tti_text == "---" else (0, 0, 255), 1, cv2.LINE_AA)
+        info_y += line_h
+
+        cv2.putText(frame, f"TGT SPD: {tgt_speed:.1f} m/s", (info_x, info_y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 165, 255), 1, cv2.LINE_AA)
+        info_y += line_h
+
+        cv2.putText(frame, f"CLR: {closing_rate:+.1f} m/s", (info_x, info_y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                    (0, 220, 80) if closing_rate > 0 else (0, 0, 220), 1, cv2.LINE_AA)
+        info_y += line_h
+
+        if hasattr(ctrl, "last_a_P") and ctrl.last_a_P is not None:
+            ap = ctrl.last_a_P
+            a_mag = math.sqrt(float(ap[0])**2 + float(ap[1])**2 + float(ap[2])**2)
+            cv2.putText(frame, f"PPN: {a_mag:.1f} m/s2", (info_x, info_y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 100, 255), 1, cv2.LINE_AA)
+
+        # ═══════════════════════════════════════════════════════
+        # TARGET LOCK BOX + INTERCEPTION VISUALS
+        # ═══════════════════════════════════════════════════════
         if locked and bbox is not None:
             bx, by, bw, bh = [int(v) for v in bbox]
             obj_cx, obj_cy = bx + bw // 2, by + bh // 2
             axis = getattr(self.sys_config.distance, "size_axis", "max") or "max"
             size_px = bbox_size_px((float(bx), float(by), float(bw), float(bh)), axis)
 
-            # Tight lock box + corner ticks so pixel size is readable
+            # Tight lock box + corner ticks
             cv2.rectangle(frame, (bx, by), (bx + bw, by + bh), (0, 255, 200), 2)
             tick = max(6, min(18, min(bw, bh) // 6))
-            # corners
             for cx0, cy0, dx, dy in (
-                (bx, by, 1, 1),
-                (bx + bw, by, -1, 1),
-                (bx, by + bh, 1, -1),
-                (bx + bw, by + bh, -1, -1),
+                (bx, by, 1, 1), (bx + bw, by, -1, 1),
+                (bx, by + bh, 1, -1), (bx + bw, by + bh, -1, -1),
             ):
                 cv2.line(frame, (cx0, cy0), (cx0 + dx * tick, cy0), (0, 255, 120), 2)
                 cv2.line(frame, (cx0, cy0), (cx0, cy0 + dy * tick), (0, 255, 120), 2)
 
-            # Highlight the measured axis (the dimension used for distance)
+            # Measured axis highlight
             if axis == "height":
                 cv2.line(frame, (obj_cx, by), (obj_cx, by + bh), (0, 220, 255), 2)
             elif axis == "diag":
                 cv2.line(frame, (bx, by), (bx + bw, by + bh), (0, 220, 255), 2)
             else:
-                # width or max → emphasize horizontal when width >= height else vertical
                 if axis == "width" or bw >= bh:
                     cv2.line(frame, (bx, obj_cy), (bx + bw, obj_cy), (0, 220, 255), 2)
                 else:
                     cv2.line(frame, (obj_cx, by), (obj_cx, by + bh), (0, 220, 255), 2)
 
+            # Target centre dot
             cv2.circle(frame, (obj_cx, obj_cy), 4, (0, 255, 255), -1)
-            cv2.line(frame, (cx, cy), (obj_cx, obj_cy), (255, 0, 255), 1)
 
+            # Interception point + steering lines
+            has_intercept = (hasattr(ctrl, "last_intercept_pt")
+                             and ctrl.last_intercept_pt is not None)
+            if has_intercept:
+                int_x = int(ctrl.last_intercept_pt[0])
+                int_y = int(ctrl.last_intercept_pt[1])
+                # Predicted intercept diamond
+                diamond_sz = 8
+                pts = np.array([
+                    [int_x, int_y - diamond_sz],
+                    [int_x + diamond_sz, int_y],
+                    [int_x, int_y + diamond_sz],
+                    [int_x - diamond_sz, int_y],
+                ], dtype=np.int32)
+                cv2.polylines(frame, [pts], True, (0, 0, 255), 2, cv2.LINE_AA)
+                cv2.circle(frame, (int_x, int_y), 3, (0, 0, 255), -1)
+
+                # Steering line (crosshair → intercept)
+                cv2.line(frame, (cx, cy), (int_x, int_y), (0, 0, 255), 2, cv2.LINE_AA)
+                # Predicted path (target → intercept)
+                cv2.line(frame, (obj_cx, obj_cy), (int_x, int_y), (0, 165, 255), 1, cv2.LINE_AA)
+
+                # TTI label near intercept point
+                if hasattr(ctrl, "last_t_intercept") and ctrl.last_t_intercept is not None:
+                    cv2.putText(frame, f"{ctrl.last_t_intercept:.1f}s",
+                                (int_x + 12, int_y - 4),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.40, (0, 0, 255), 1, cv2.LINE_AA)
+            else:
+                cv2.line(frame, (cx, cy), (obj_cx, obj_cy), (255, 0, 255), 1)
+
+            # ── Text telemetry under the box ──
             tid = self.active_target.target_id if self.active_target else "---"
             label_y = max(16, by - 8)
-            cv2.putText(
-                frame,
-                f"LOCK [{tid}] {source.upper()} {conf * 100:.0f}%",
-                (bx, label_y),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.48,
-                (0, 255, 255),
-                1,
-                cv2.LINE_AA,
-            )
-            # Pixel KPIs under the box — critical for distance accuracy
-            cv2.putText(
-                frame,
-                f"W:{bw}px  H:{bh}px  SIZE:{size_px:.0f}px ({axis})",
-                (bx, min(h - 8, by + bh + 18)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.48,
-                (80, 255, 160),
-                1,
-                cv2.LINE_AA,
-            )
-            cv2.putText(
-                frame,
-                f"DIST {dist_m:.2f} m",
-                (bx, min(h - 8, by + bh + 38)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.55,
-                (100, 255, 100),
-                2,
-                cv2.LINE_AA,
-            )
+            cv2.putText(frame,
+                        f"LOCK [{tid}] {source.upper()} {conf * 100:.0f}%",
+                        (bx, label_y), cv2.FONT_HERSHEY_SIMPLEX, 0.48,
+                        (0, 255, 255), 1, cv2.LINE_AA)
+
+            cv2.putText(frame,
+                        f"W:{bw}px  H:{bh}px  SIZE:{size_px:.0f}px ({axis})",
+                        (bx, min(h - 8, by + bh + 18)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.48, (80, 255, 160), 1, cv2.LINE_AA)
+
+            cv2.putText(frame,
+                        f"DIST {dist_m:.2f} m",
+                        (bx, min(h - 8, by + bh + 38)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (100, 255, 100), 2, cv2.LINE_AA)
+
             brg = self.controller.last_bearing
             if brg is not None and mount_active:
-                cv2.putText(
-                    frame,
-                    f"AZ {math.degrees(brg.az_rad):+.1f}  EL {math.degrees(brg.el_rad):+.1f}  "
-                    f"LOS {brg.slant_m:.2f}m  dALT {brg.vertical_m:+.2f}m",
-                    (bx, min(h - 8, by + bh + 56)),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.45,
-                    (0, 200, 255),
-                    1,
-                    cv2.LINE_AA,
-                )
+                cv2.putText(frame,
+                            f"AZ {math.degrees(brg.az_rad):+.1f}  EL {math.degrees(brg.el_rad):+.1f}  "
+                            f"LOS {brg.slant_m:.2f}m  dALT {brg.vertical_m:+.2f}m",
+                            (bx, min(h - 8, by + bh + 56)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 200, 255), 1, cv2.LINE_AA)
 
+        # ═══════════════════════════════════════════════════════
+        # BOTTOM STATUS BAR
+        # ═══════════════════════════════════════════════════════
         header_color = (0, 255, 0) if safety.is_safe else (0, 0, 255)
-        cv2.putText(
-            frame,
-            f"STATUS: {safety.reason}",
-            (20, 35),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            header_color,
-            2,
-        )
-        cv2.putText(
-            frame,
-            f"CAM:{self.active_cam_idx}  FPS:{self.current_fps:.0f}  AETR R:{roll} P:{pitch} Y:{yaw} T:{throttle}  SERIAL:{'OK' if self.is_connected else 'OFF'}",
-            (20, h - 25),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.55,
-            (255, 255, 255),
-            2,
-        )
+        cv2.putText(frame, f"STATUS: {safety.reason}",
+                    (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.6, header_color, 2)
+
+        cv2.putText(frame,
+                    f"CAM:{self.active_cam_idx}  FPS:{self.current_fps:.0f}  "
+                    f"AETR R:{roll} P:{pitch} Y:{yaw} T:{throttle}  "
+                    f"SERIAL:{'OK' if self.is_connected else 'OFF'}",
+                    (20, h - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
+
         follow_color = (80, 220, 120) if self.follow_status.startswith("FOLLOWING") else (0, 180, 255)
-        cv2.putText(
-            frame,
-            f"CTRL: {self.follow_status}  ASSIST:{'ON' if self.assist_enabled else 'OFF'}",
-            (20, h - 52),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.50,
-            follow_color,
-            2,
-            cv2.LINE_AA,
-        )
+        cv2.putText(frame,
+                    f"CTRL: {self.follow_status}  ASSIST:{'ON' if self.assist_enabled else 'OFF'}",
+                    (20, h - 52), cv2.FONT_HERSHEY_SIMPLEX, 0.50, follow_color, 2, cv2.LINE_AA)
 
     def stop(self) -> None:
         self.running = False

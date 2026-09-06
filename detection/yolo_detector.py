@@ -49,14 +49,14 @@ class YOLODetector:
 
         if mode == "coco":
             for candidate in (
-                ROOT / "yolov8n.pt",
-                MODELS_DIR / "yolov8n.pt",
-                MODELS_DIR / "yolov8s.pt",
-                ROOT / "yolov8s.pt",
+                ROOT / "yolov3u.pt",
+                MODELS_DIR / "yolov3u.pt",
+                MODELS_DIR / "yolo11s.pt",
+                ROOT / "yolo11s.pt",
             ):
                 if candidate.is_file():
-                    return str(candidate)
-            return "yolov8n.pt"
+                    return str(candidate)                           
+            return "yolov3u.pt"
 
         # world (default)
         path = Path(self.cfg.model_path)
@@ -64,7 +64,7 @@ class YOLODetector:
             return str(path)
         name = self.cfg.model_name
         if "world" not in name.lower():
-            name = "yolov8s-world.pt"
+            name = "yolo11s-world.pt"
         return name
 
     def _load(self) -> None:
