@@ -107,7 +107,7 @@ class CameraConfig:
 @dataclass
 class DetectionConfig:
     mode: DetectionMode = "coco"
-    model_name: str = "yolo11n.pt"
+    weights_path: str = "yolo11n.pt"
     model_path: Path = field(default_factory=lambda: MODELS_DIR / "yolo11n.pt")
     custom_weights: Path = field(
         default_factory=lambda: MODELS_DIR / "drone_missile_best.pt"
@@ -132,7 +132,7 @@ class TrackerConfig:
     max_age: int = 45
     min_hits: int = 2
     iou_match_threshold: float = 0.25
-    lock_tracker: Literal["csrt", "kcf", "none"] = "none"  # none = faster; scale lock handles size
+    lock_tracker: Literal["csrt", "kcf", "none"] = "csrt"  # csrt = more robust, implements CSR-DCF
     reacquire_iou: float = 0.12
     reacquire_max_frames: int = 90
     enable_template_fallback: bool = True
@@ -185,6 +185,14 @@ class JoystickConfig:
         ),
         JoystickChannelConfig(
             name="Flight Mode", axis=1, is_button=True, rc_channel=5,
+            min_val=1000, center_val=1000, max_val=1900,
+        ),
+        JoystickChannelConfig(
+            name="Lock", axis=2, is_button=True, rc_channel=6,
+            min_val=1000, center_val=1000, max_val=1900,
+        ),
+        JoystickChannelConfig(
+            name="Follow", axis=3, is_button=True, rc_channel=7,
             min_val=1000, center_val=1000, max_val=1900,
         ),
     ])

@@ -98,7 +98,7 @@ def build_msp_set_raw_rc(channels: Sequence[int]) -> bytes:
     return b"$M<" + bytes([size, MSP_SET_RAW_RC]) + payload + bytes([checksum])
 
 
-def read_msp_response(ser: serial.Serial, timeout: float = 0.1) -> tuple[int, bytes] | None:
+def read_msp_response(ser: serial.Serial, timeout: float = 0.02) -> tuple[int, bytes] | None:
     """Parse incoming $M> response header & payload from FC."""
     t0 = time.time()
     while time.time() - t0 < timeout:

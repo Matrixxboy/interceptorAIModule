@@ -312,8 +312,8 @@ class HybridYoloLockTracker:
 
         elif cv_ok and cv_box is not None:
             if self._bbox_f is not None:
-                lw, lh = self._bbox_f[2], self._bbox_f[3]
-                cw, ch = cv_box[2], cv_box[3]
+                lw, lh = max(1.0, self._bbox_f[2]), max(1.0, self._bbox_f[3])
+                cw, ch = max(1.0, cv_box[2]), max(1.0, cv_box[3])
                 cx = cv_box[0] + cw * 0.5
                 cy = cv_box[1] + ch * 0.5
                 if cw > 2.0 * lw or ch > 2.0 * lh or cw < 0.5 * lw or ch < 0.5 * lh:

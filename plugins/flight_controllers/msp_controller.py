@@ -118,6 +118,10 @@ class MSPController(FlightController):
             self.ser.write(msp_link.build_msp_set_raw_rc(channels))
             self._armed = True
             return True
+        except (serial.SerialException, OSError) as e:
+            self.logger.error(f"Serial error during arm: {e}")
+            self.disconnect()
+            return False
         except Exception as e:
             self.logger.error(f"Failed to send arm command: {e}")
             return False
@@ -134,6 +138,10 @@ class MSPController(FlightController):
             self.ser.write(msp_link.build_msp_set_raw_rc(channels))
             self._armed = False
             return True
+        except (serial.SerialException, OSError) as e:
+            self.logger.error(f"Serial error during disarm: {e}")
+            self.disconnect()
+            return False
         except Exception as e:
             self.logger.error(f"Failed to send disarm command: {e}")
             return False
@@ -152,6 +160,9 @@ class MSPController(FlightController):
         )
         try:
             self.ser.write(msp_link.build_msp_set_raw_rc(channels))
+        except (serial.SerialException, OSError) as e:
+            self.logger.error(f"Serial error sending control: {e}")
+            self.disconnect()
         except Exception as e:
             self.logger.error(f"Failed to send control command: {e}")
 
@@ -164,6 +175,9 @@ class MSPController(FlightController):
             resp = msp_link.read_msp_response(self.ser)
             if resp and resp[0] == msp_link.MSP_ATTITUDE:
                 return msp_link.parse_msp_attitude(resp[1]) or {}
+        except (serial.SerialException, OSError) as e:
+            self.logger.error(f"Serial error reading attitude: {e}")
+            self.disconnect()
         except Exception as e:
             self.logger.error(f"Error reading attitude: {e}")
         return {}
@@ -198,6 +212,9 @@ class MSPController(FlightController):
                 analog_data = msp_link.parse_msp_analog(resp[1])
                 if analog_data:
                     telemetry.update(analog_data)
+        except (serial.SerialException, OSError) as e:
+            self.logger.error(f"Serial error reading telemetry: {e}")
+            self.disconnect()
         except Exception as e:
             self.logger.error(f"Error reading telemetry: {e}")
         return telemetry

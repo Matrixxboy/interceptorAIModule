@@ -86,6 +86,8 @@ class TrackingWorkerThread(QThread):
         self.throttle_value: int = 1000
         self.flight_mode: str = "ANGLE"
         self.follow_status: str = "IDLE"  # Why sticks are / aren't AI-driven (HUD)
+        self._joy_lock_state: bool = False
+        self._joy_follow_state: bool = False
 
     def adjust_throttle(self, delta: int) -> int:
         self.throttle_value = max(1000, min(2000, self.throttle_value + delta))
@@ -382,6 +384,10 @@ class TrackingWorkerThread(QThread):
             dt = max(0.001, now - last_time)
             last_time = now
 
+            if ok and frame is not None:
+                # Apply Gaussian Blur to reduce noise and enhance tracking/detection visibility
+                frame = cv2.GaussianBlur(frame, (3, 3), 0)
+
             h, w = frame.shape[:2]
             cx, cy = w // 2, h // 2
 
@@ -390,7 +396,6 @@ class TrackingWorkerThread(QThread):
                     rx, ry, rw, rh = self.pending_roi
                     self.hybrid.lock_xywh(frame, (rx, ry, rw, rh), label="manual")
                     self.controller.reset()
-                    self.assist_enabled = True
                     self._start_target_lock(frame, (rx, ry, rw, rh), "manual", "manual")
                     self.pending_roi = None
 
@@ -401,7 +406,6 @@ class TrackingWorkerThread(QThread):
                             frame, self.hybrid._bbox, "yolo", self.hybrid._label or "yolo"
                         )
                     self.controller.reset()
-                    self.assist_enabled = True
                     self.pending_auto_lock = False
 
                 dets = []
@@ -533,10 +537,14 @@ class TrackingWorkerThread(QThread):
                                 if arm_pwm is not None and int(aux_cfg.rc_channel) >= 0:
                                     channel_overrides[int(aux_cfg.rc_channel)] = int(arm_pwm)
                                 break
-                    if arm_pwm is None:
-                        arm_pwm = self.sys_config.aux_channels.arm_low
-
-                    joy_wants_arm = int(arm_pwm) >= int(self.sys_config.aux_channels.arm_high) - 50
+                    
+                    joy_wants_arm = getattr(self, "arm_requested", False)
+                    if arm_pwm is not None:
+                        pwm_val = int(arm_pwm)
+                        if pwm_val > 1600:
+                            joy_wants_arm = True
+                        elif pwm_val < 1400:
+                            joy_wants_arm = False
 
                     # Ensure FC arm channel carries the Arm switch value when mapped
                     if arm_ch not in channel_overrides and arm_pwm is not None:
@@ -563,6 +571,45 @@ class TrackingWorkerThread(QThread):
                             self.flight_mode = "ACRO"
                             if hasattr(self.fc, "set_flight_mode"):
                                 self.fc.set_flight_mode("ACRO")
+
+                    # Lock switch
+                    lock_pwm = js.aux_pwm.get("Lock")
+                    if lock_pwm is None:
+                        for i, aux_cfg in enumerate(self.sys_config.joystick.aux_channels):
+                            if "lock" in (aux_cfg.name or "").lower():
+                                lock_pwm = js.aux_pwm.get(f"#{i}")
+                                break
+                    joy_wants_lock = self._joy_lock_state
+                    if lock_pwm is not None:
+                        pwm_val = int(lock_pwm)
+                        if pwm_val > 1600:
+                            joy_wants_lock = True
+                        elif pwm_val < 1400:
+                            joy_wants_lock = False
+                        
+                    if joy_wants_lock and not self._joy_lock_state:
+                        self.trigger_auto_lock()
+                    elif not joy_wants_lock and self._joy_lock_state:
+                        self.reset_lock()
+                    self._joy_lock_state = joy_wants_lock
+
+                    # Follow switch
+                    follow_pwm = js.aux_pwm.get("Follow")
+                    if follow_pwm is None:
+                        for i, aux_cfg in enumerate(self.sys_config.joystick.aux_channels):
+                            if "follow" in (aux_cfg.name or "").lower():
+                                follow_pwm = js.aux_pwm.get(f"#{i}")
+                                break
+                    joy_wants_follow = self._joy_follow_state
+                    if follow_pwm is not None:
+                        pwm_val = int(follow_pwm)
+                        if pwm_val > 1600:
+                            joy_wants_follow = True
+                        elif pwm_val < 1400:
+                            joy_wants_follow = False
+                        # Continuously enforce the physical switch state for follow
+                        self.assist_enabled = joy_wants_follow
+                        self._joy_follow_state = joy_wants_follow
                 else:
                     self.arm_requested = bool(self.gui_arm_requested)
 
