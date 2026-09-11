@@ -199,19 +199,19 @@ class JoystickConfig:
 
     aux_channels: list[JoystickChannelConfig] = field(default_factory=lambda: [
         JoystickChannelConfig(
-            name="Lock", axis=2, is_button=False, rc_channel=4,
+            name="Lock", axis=4, is_button=False, rc_channel=4,
             min_val=1000, center_val=1500, max_val=1900,
         ),
         JoystickChannelConfig(
-            name="Follow", axis=3, is_button=False, rc_channel=5,
+            name="Follow", axis=5, is_button=False, rc_channel=5,
             min_val=1000, center_val=1500, max_val=1900,
         ),
         JoystickChannelConfig(
-            name="Arm", axis=0, is_button=False, rc_channel=6,
+            name="Arm", axis=6, is_button=False, rc_channel=6,
             min_val=1000, center_val=1500, max_val=1800,
         ),
         JoystickChannelConfig(
-            name="Flight Mode", axis=1, is_button=False, rc_channel=7,
+            name="Flight Mode", axis=7, is_button=False, rc_channel=7,
             min_val=1000, center_val=1500, max_val=1900,
         ),
     ])
