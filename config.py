@@ -166,8 +166,8 @@ class DeviceConfig:
 
 @dataclass
 class AuxChannelsConfig:
-    arm_channel: int = 4
-    mode_channel: int = 5
+    arm_channel: int = 6   # CH7 / AUX3
+    mode_channel: int = 7  # CH8 / AUX4
     arm_high: int = 1800
     arm_low: int = 1000
     mode_high: int = 1900
@@ -199,20 +199,20 @@ class JoystickConfig:
 
     aux_channels: list[JoystickChannelConfig] = field(default_factory=lambda: [
         JoystickChannelConfig(
-            name="Arm", axis=0, is_button=True, rc_channel=4,
-            min_val=1000, center_val=1000, max_val=1800,
+            name="Lock", axis=2, is_button=False, rc_channel=4,
+            min_val=1000, center_val=1500, max_val=1900,
         ),
         JoystickChannelConfig(
-            name="Flight Mode", axis=1, is_button=True, rc_channel=5,
-            min_val=1000, center_val=1000, max_val=1900,
+            name="Follow", axis=3, is_button=False, rc_channel=5,
+            min_val=1000, center_val=1500, max_val=1900,
         ),
         JoystickChannelConfig(
-            name="Lock", axis=2, is_button=True, rc_channel=6,
-            min_val=1000, center_val=1000, max_val=1900,
+            name="Arm", axis=0, is_button=False, rc_channel=6,
+            min_val=1000, center_val=1500, max_val=1800,
         ),
         JoystickChannelConfig(
-            name="Follow", axis=3, is_button=True, rc_channel=7,
-            min_val=1000, center_val=1000, max_val=1900,
+            name="Flight Mode", axis=1, is_button=False, rc_channel=7,
+            min_val=1000, center_val=1500, max_val=1900,
         ),
     ])
 

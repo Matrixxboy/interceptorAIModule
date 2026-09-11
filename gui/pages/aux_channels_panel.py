@@ -36,7 +36,9 @@ class AuxChannelsPanel(QWidget):
         root.setContentsMargins(4, 4, 4, 4)
         root.setSpacing(6)
 
-        hint = QLabel("Match INAV Modes tab · ARM on AUX1 → CH5 · ANGLE on AUX2 → CH6")
+        hint = QLabel(
+            "Match INAV Modes tab · LOCK CH5 · FOLLOW CH6 · ARM CH7 (AUX3) · ANGLE/ACRO CH8 (AUX4)"
+        )
         hint.setStyleSheet("color: #6b7380; font-size: 8pt;")
         root.addWidget(hint)
 

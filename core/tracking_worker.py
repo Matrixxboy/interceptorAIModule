@@ -358,34 +358,47 @@ class TrackingWorkerThread(QThread):
         )
 
     def _open_camera(self, cam_idx: int | str) -> cv2.VideoCapture | None:
-        """Open the goggles HDMI capture card. Do not scan other USB devices."""
+        """Open the goggles HDMI card the same way OBS does: Media Foundation index.
+
+        OpenCV 5 DirectShow cannot open this card by name (it fails instantly).
+        MSMF index 1 is the USB3.0 UHD capture card. Do not open index 0 — that
+        is the laptop webcam and resets USB.
+        """
         name = str(cam_idx).strip()
-        if not name or name.isdigit():
-            name = _GOGGLES_CAPTURE
-        self.camera_status = f"Opening {name}…"
-        cap = cv2.VideoCapture()
-        # Bound the hang. A DirectShow open/read with no timeout freezes the UI.
-        if hasattr(cv2, "CAP_PROP_OPEN_TIMEOUT_MSEC"):
-            cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 2500)
-        if hasattr(cv2, "CAP_PROP_READ_TIMEOUT_MSEC"):
-            cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 400)
-        opened = cap.open(f"video={name}", cv2.CAP_DSHOW)
-        if not opened:
+        if name.isdigit() and not _is_capture_card(name):
+            index = int(name)
+            label = name
+        else:
+            index = 1
+            label = _GOGGLES_CAPTURE
+        self.camera_status = f"Opening {label}…"
+        cap = cv2.VideoCapture(index, cv2.CAP_MSMF)
+        if not cap.isOpened():
             cap.release()
-            self.camera_status = f"{name} — capture card did not open"
+            self.camera_status = (
+                f"{label} — close OBS, then restart (card is in use)"
+                if index == 1
+                else f"{label} — camera did not open"
+            )
             self.sys_log.log(
                 LogCategory.CAMERA,
-                f"Could not open USB capture '{name}'",
+                f"Could not open USB capture index {index} ({label})",
                 severity=LogSeverity.ERROR,
             )
             return None
         try:
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.sys_config.camera.frame_width)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.sys_config.camera.frame_height)
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         except Exception:
             pass
-        self.active_cam_name = name
-        self.camera_status = f"{name} — waiting for goggles HDMI"
-        self.sys_log.log(LogCategory.CAMERA, f"Opened USB capture card: {name}")
+        self.active_cam_idx = index
+        self.active_cam_name = label
+        self.camera_status = f"{label} — waiting for goggles HDMI"
+        self.sys_log.log(
+            LogCategory.CAMERA,
+            f"Opened USB capture card {label} (MSMF index {index})",
+        )
         return cap
 
     def run(self) -> None:
@@ -637,7 +650,7 @@ class TrackingWorkerThread(QThread):
                     channel_overrides.pop(arm_ch, None)
 
                     # Latch ARM until an explicit disarm (GUI / X). A released or
-                    # glitchy stick must not drop CH5 in flight.
+                    # glitchy stick must not drop CH7 (ARM) in flight.
                     if getattr(self, "force_disarm", False):
                         self.arm_requested = False
                         self.gui_arm_requested = False

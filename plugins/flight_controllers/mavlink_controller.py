@@ -23,8 +23,8 @@ class MAVLinkController(FlightController):
         self._flight_mode = "ANGLE"
         self._last_log_time = 0.0
         self._channel_overrides: dict[int, int] = {}
-        self.arm_channel = 4
-        self.mode_channel = 5
+        self.arm_channel = 6
+        self.mode_channel = 7
         self.arm_high = 1800
         self.arm_low = 1000
         self.mode_high = 1900
@@ -35,8 +35,8 @@ class MAVLinkController(FlightController):
 
     def update_aux_config(
         self,
-        arm_channel: int = 4,
-        mode_channel: int = 5,
+        arm_channel: int = 6,
+        mode_channel: int = 7,
         arm_high: int = 1800,
         arm_low: int = 1000,
         mode_high: int = 1900,
@@ -114,8 +114,8 @@ class MAVLinkController(FlightController):
         ch[0], ch[1], ch[2], ch[3] = int(roll), int(pitch), int(throttle), int(yaw)
 
         mode_str = getattr(self, "_flight_mode", "ANGLE").upper()
-        arm_idx = max(0, min(7, int(getattr(self, "arm_channel", 4))))
-        mode_idx = max(0, min(7, int(getattr(self, "mode_channel", 5))))
+        arm_idx = max(0, min(7, int(getattr(self, "arm_channel", 6))))
+        mode_idx = max(0, min(7, int(getattr(self, "mode_channel", 7))))
         ch[arm_idx] = int(self.arm_high if self._armed else self.arm_low)
         ch[mode_idx] = int(self.mode_high if mode_str == "ANGLE" else self.mode_low)
 

@@ -29,8 +29,8 @@ ROLL_CH = 0
 PITCH_CH = 1
 THROTTLE_CH = 2
 YAW_CH = 3
-ARM_CH = 4   # AUX1 (Index 4)
-MODE_CH = 5  # AUX2 (Index 5)
+ARM_CH = 6   # CH7 / AUX3 (Index 6)
+MODE_CH = 7  # CH8 / AUX4 (Index 7)
 
 ARM_HIGH = 1800
 ARM_LOW = 1000
@@ -213,7 +213,7 @@ def make_rc_channels(
     """Assemble 16-channel RC array supporting AETR/TAER maps and AUX overrides.
 
     Channel indices are 0-based (CH1=0 … CH16=15).
-    AUX1 is typically index 4 (CH5), AUX2 index 5 (CH6).
+    AUX1=CH5 lock, AUX2=CH6 follow, AUX3=CH7 ARM, AUX4=CH8 ANGLE/ACRO.
     """
     ch = [RC_MID] * NUM_CHANNELS
 
