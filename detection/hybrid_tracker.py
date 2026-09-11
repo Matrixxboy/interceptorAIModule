@@ -352,8 +352,13 @@ class HybridYoloLockTracker:
 
         xywh = self._as_int(xywh_f) if xywh_f is not None else self._bbox
 
-        # 4) YOLO verification — never fatten a tight manual box
-        if run_yolo and dets and xywh is not None:
+        # 4) YOLO verification — do not steal a healthy lock
+        healthy_lock = (
+            target_ok
+            and self.scale_lock.locked
+            and float(self.scale_lock.last_score) >= 0.50
+        )
+        if run_yolo and dets and xywh is not None and not healthy_lock:
             candidates = []
             for d in dets:
                 iou = self._iou_xywh(xywh, d)

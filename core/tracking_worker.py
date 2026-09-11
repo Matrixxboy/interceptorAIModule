@@ -218,7 +218,14 @@ class TrackingWorkerThread(QThread):
         return sum(self._fps_window) / len(self._fps_window)
 
     def switch_camera(self, cam_index: int | str) -> None:
-        """Switch video source. Name opens that USB device only — no hub probe."""
+        """Switch video source. Do not reopen the HDMI card — that resets USB."""
+        name = str(cam_index).strip()
+        if (
+            self.active_cam_name
+            and _is_capture_card(self.active_cam_name)
+            and (not name.isdigit() or _is_capture_card(name))
+        ):
+            return
         self.requested_cam_idx = cam_index
 
     def connect_serial(self, port_name: str, baud_rate: int = 115200) -> tuple[bool, str]:
@@ -371,10 +378,35 @@ class TrackingWorkerThread(QThread):
             target_id=profile.target_id,
         )
 
-    def _try_msmf(self, index: int) -> cv2.VideoCapture | None:
+    def _open_camera(self, cam_idx: int | str) -> cv2.VideoCapture | None:
+        """Open only the HDMI grabber. Never scan other USB cameras.
+
+        Opening webcam / IR / extra capture indexes on a shared hub resets the
+        USB3.0 UHD card and kills the goggles feed when telemetry is plugged in.
+        """
+        name = str(cam_idx).strip()
+        if name.isdigit():
+            index = int(name)
+        else:
+            index = int(self.sys_config.camera.camera_index)
+        if index <= 0:
+            index = 1
+
+        label = _GOGGLES_CAPTURE
+        self.camera_status = f"Opening {label}…"
         cap = cv2.VideoCapture(index, cv2.CAP_MSMF)
+        if not cap.isOpened() and index != 1:
+            cap.release()
+            index = 1
+            cap = cv2.VideoCapture(index, cv2.CAP_MSMF)
         if not cap.isOpened():
             cap.release()
+            self.camera_status = f"{label} — close OBS, then restart (card is in use)"
+            self.sys_log.log(
+                LogCategory.CAMERA,
+                f"Could not open USB capture index {index} ({label})",
+                severity=LogSeverity.ERROR,
+            )
             return None
         try:
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.sys_config.camera.frame_width)
@@ -382,90 +414,15 @@ class TrackingWorkerThread(QThread):
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         except Exception:
             pass
-        return cap
-
-    def _capture_score(self, cap: cv2.VideoCapture) -> int:
-        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
-        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
-        if w < 640 or h < 360:
-            return 0
-        score = w * h
-        # HDMI grabbers are 720p/1080p; laptop webcams are usually smaller.
-        if w >= 1280 and h >= 720:
-            score += 10_000_000
-        return score
-
-    def _open_camera(self, cam_idx: int | str) -> cv2.VideoCapture | None:
-        """Open the goggles HDMI card via Media Foundation.
-
-        Do not assume MSMF index 1. Plugging in telemetry shifts Windows
-        camera indices, so index 1 can become a webcam / IR cam. Pick the
-        HDMI-sized device instead. DirectShow-by-name fails on this card.
-        """
-        name = str(cam_idx).strip()
-        want_capture = (not name.isdigit()) or _is_capture_card(name)
-        preferred = int(self.sys_config.camera.camera_index)
-        if name.isdigit():
-            preferred = int(name)
-
-        self.camera_status = f"Opening {_GOGGLES_CAPTURE if want_capture else name}…"
-        order: list[int] = []
-        for i in (preferred, 1, 2, 3, 4, 5):
-            if 1 <= i <= 9 and i not in order:
-                order.append(i)
-
-        best_cap: cv2.VideoCapture | None = None
-        best_idx = preferred
-        best_score = -1
-        for index in order:
-            cap = self._try_msmf(index)
-            if cap is None:
-                continue
-            score = self._capture_score(cap)
-            if want_capture and score >= 10_000_000:
-                if best_cap is not None:
-                    best_cap.release()
-                best_cap, best_idx, best_score = cap, index, score
-                break
-            if score > best_score:
-                if best_cap is not None:
-                    best_cap.release()
-                best_cap, best_idx, best_score = cap, index, score
-            else:
-                cap.release()
-
-        # Index 0 is usually the laptop webcam. Opening it can reset USB, so
-        # only try it if no other video device looked like an HDMI grabber.
-        if best_cap is None or (want_capture and best_score < 10_000_000):
-            cap0 = self._try_msmf(0)
-            if cap0 is not None:
-                score0 = self._capture_score(cap0)
-                if score0 > best_score:
-                    if best_cap is not None:
-                        best_cap.release()
-                    best_cap, best_idx, best_score = cap0, 0, score0
-                else:
-                    cap0.release()
-
-        if best_cap is None:
-            self.camera_status = f"{_GOGGLES_CAPTURE} — close OBS, then restart (card is in use)"
-            self.sys_log.log(
-                LogCategory.CAMERA,
-                "Could not open USB capture card (no MSMF device)",
-                severity=LogSeverity.ERROR,
-            )
-            return None
-
-        label = _GOGGLES_CAPTURE if want_capture or best_score >= 10_000_000 else name
-        self.active_cam_idx = best_idx
+        self.active_cam_idx = index
         self.active_cam_name = label
-        self.sys_config.camera.camera_index = best_idx
+        self.sys_config.camera.camera_index = index
         self.camera_status = f"{label} — waiting for goggles HDMI"
         self.sys_log.log(
             LogCategory.CAMERA,
-            f"Opened USB capture card {label} (MSMF index {best_idx})",
+            f"Opened USB capture card {label} (MSMF index {index})",
         )
-        return best_cap
+        return cap
 
     def run(self) -> None:
         self.running = True
@@ -525,16 +482,8 @@ class TrackingWorkerThread(QThread):
                     failed_reads += 1
 
             if not ok or frame is None:
-                # USB re-plug of telemetry can invalidate the MSMF handle.
-                # Only re-open if the device itself died — black HDMI is normal.
-                if cap is None or not cap.isOpened():
-                    if cap is not None:
-                        try:
-                            cap.release()
-                        except Exception:
-                            pass
-                    cap = self._open_camera(_GOGGLES_CAPTURE)
-                    failed_reads = 0
+                # Black HDMI is normal (goggles off). Do not reopen — that
+                # scans USB and drops telemetry + the capture card together.
                 if self.active_cam_name:
                     self.camera_status = f"{self.active_cam_name} — waiting for goggles HDMI"
                 frame = np.zeros((360, 640, 3), dtype=np.uint8)
@@ -696,6 +645,15 @@ class TrackingWorkerThread(QThread):
                             js.aux_pwm.get(aux_cfg.name, aux_cfg.center_val),
                         )
                         channel_overrides[rc] = int(pwm)
+
+                    # Lock / Follow are GCS-only. Sending them on CH5/CH6 makes
+                    # INAV treat lock as a flight mode after the target is locked.
+                    for i, aux_cfg in enumerate(self.sys_config.joystick.aux_channels):
+                        n = (aux_cfg.name or "").lower()
+                        if "lock" in n or "follow" in n:
+                            rc = int(aux_cfg.rc_channel)
+                            if rc >= 0:
+                                channel_overrides.pop(rc, None)
 
                     # Resolve Arm switch PWM from FC arm channel or named "Arm" AUX
                     arm_ch = int(self.sys_config.aux_channels.arm_channel)

@@ -162,7 +162,7 @@ class MSPController(FlightController):
         channels = self._build_channels(
             roll, pitch, yaw, throttle,
             arm=self._armed,
-            flight_mode=is_angle or self._armed,
+            flight_mode=is_angle,
         )
         try:
             self.ser.write(msp_link.build_msp_set_raw_rc(channels))

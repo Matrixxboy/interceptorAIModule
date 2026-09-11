@@ -238,9 +238,6 @@ class MainWindow(QMainWindow):
                         selected = self.combo_cameras.itemData(i)
                         break
         self.combo_cameras.blockSignals(False)
-        if probe and selected is not None and selected != previous:
-            self.worker.switch_camera(selected)
-            self.statusBar().showMessage(f"USB video: {selected}")
 
     def _on_camera_changed(self) -> None:
         source = self.combo_cameras.currentData()
