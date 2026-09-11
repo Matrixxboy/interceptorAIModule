@@ -61,12 +61,82 @@ ARMING_DISABLE_FLAG_NAMES = [
 ]
 
 
-def list_serial_ports() -> list[tuple[str, str]]:
-    """Return list of available (device_path, description)."""
-    ports = []
+# HDMI USB capture cards (MacroSilicon MS2109/MS2130 and clones) expose a
+# fake COM port. Opening it steals the composite USB device and kills HDMI.
+_CAPTURE_VIDS = {0x534D, 0x345F, 0x1B71}
+_CAPTURE_HINTS = (
+    "uhd", "hdmi", "capture", "ms2109", "ms2130", "macrosilicon",
+    "usb3.0 capture", "usb 3.0 capture", "video grab", "ezcap",
+)
+_TELEMETRY_HINTS = (
+    "stm", "stmicro", "cp210", "ch340", "ch910", "ftdi", "ft232",
+    "silicon labs", "usb serial", "usb-serial", "virtual com",
+    "at32", "vcp", "betaflight", "inav", "arduino", "espressif",
+    "elrs", "expresslrs", "crossfire", "telemetry", "msp",
+)
+_TELEMETRY_VIDS = {0x0483, 0x10C4, 0x1A86, 0x0403, 0x303A, 0x2E3C, 0x314B}
+
+
+def _port_blob(p) -> str:
+    parts = [
+        getattr(p, "device", ""),
+        getattr(p, "description", ""),
+        getattr(p, "hwid", ""),
+        getattr(p, "manufacturer", "") or "",
+        getattr(p, "product", "") or "",
+        getattr(p, "interface", "") or "",
+    ]
+    return " ".join(str(x) for x in parts if x).lower()
+
+
+def classify_serial_port(p) -> str:
+    """Return 'capture', 'telemetry', or 'other'."""
+    try:
+        vid = int(p.vid or 0)
+    except (TypeError, ValueError):
+        vid = 0
+    blob = _port_blob(p)
+    if vid in _CAPTURE_VIDS or any(h in blob for h in _CAPTURE_HINTS):
+        return "capture"
+    if vid in _TELEMETRY_VIDS or any(h in blob for h in _TELEMETRY_HINTS):
+        return "telemetry"
+    return "other"
+
+
+def is_capture_card_port(port_name: str) -> bool:
+    """True if this COM port belongs to the HDMI capture card — do not open it."""
+    want = (port_name or "").strip().upper()
+    if not want:
+        return False
     for p in list_ports.comports():
-        ports.append((p.device, f"{p.device} ({p.description})"))
-    return ports
+        if str(p.device).upper() == want:
+            return classify_serial_port(p) == "capture"
+    return False
+
+
+def list_serial_ports(include_capture: bool = False) -> list[tuple[str, str]]:
+    """Return (device_path, description) with telemetry first.
+
+    Capture-card virtual COM ports are omitted by default so Connect cannot
+    grab the HDMI dongle and stop the video feed.
+    """
+    ranked: list[tuple[int, str, str]] = []
+    for p in list_ports.comports():
+        kind = classify_serial_port(p)
+        if kind == "capture" and not include_capture:
+            continue
+        if kind == "capture":
+            label = f"{p.device}  [CAPTURE CARD — do not use]"
+            rank = 2
+        elif kind == "telemetry":
+            label = f"{p.device}  ({p.description})  telemetry"
+            rank = 0
+        else:
+            label = f"{p.device}  ({p.description})"
+            rank = 1
+        ranked.append((rank, p.device, label))
+    ranked.sort(key=lambda row: (row[0], row[1].upper()))
+    return [(dev, label) for _, dev, label in ranked]
 
 
 def clamp(val: float, lo: float, hi: float) -> int:

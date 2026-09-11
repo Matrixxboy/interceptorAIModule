@@ -249,17 +249,24 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"USB video: {source}")
 
     def _refresh_serial_ports(self) -> None:
+        previous = self.combo_ports.currentData()
+        preferred = (self.worker.port_name or self.sys_config.device.serial_port or "").strip()
         self.combo_ports.clear()
         ports = list_serial_ports()
         if not ports:
-            self.combo_ports.addItem("No serial ports detected", "")
+            self.combo_ports.addItem("No telemetry ports detected", "")
             self.combo_ports.setEnabled(False)
             self.btn_connect.setEnabled(False)
-        else:
-            self.combo_ports.setEnabled(True)
-            self.btn_connect.setEnabled(True)
-            for dev, label in ports:
-                self.combo_ports.addItem(label, dev)
+            return
+        self.combo_ports.setEnabled(True)
+        self.btn_connect.setEnabled(True)
+        for dev, label in ports:
+            self.combo_ports.addItem(label, dev)
+        pick = previous or preferred
+        if pick:
+            idx = self.combo_ports.findData(pick)
+            if idx >= 0:
+                self.combo_ports.setCurrentIndex(idx)
 
     def _toggle_serial_connection(self) -> None:
         if self.worker.is_connected:

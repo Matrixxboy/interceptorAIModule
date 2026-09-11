@@ -162,6 +162,9 @@ class TrackerConfig:
 class DeviceConfig:
     theme: str = "dark"
     ui_scale: float = 1.0
+    # Last-used MSP telemetry COM port (never the HDMI capture card's virtual COM)
+    serial_port: str = ""
+    baud_rate: int = 115200
 
 
 @dataclass

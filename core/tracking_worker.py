@@ -12,6 +12,7 @@ from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
 from config import SystemConfig
 from control.fpv_follow import FPVFollowController
+from control.msp_link import is_capture_card_port
 from plugins.flight_controllers.mavlink_controller import MAVLinkController
 from plugins.flight_controllers.msp_controller import MSPController
 from database.target_profile import TargetProfile, TargetStatus
@@ -221,6 +222,15 @@ class TrackingWorkerThread(QThread):
         self.requested_cam_idx = cam_index
 
     def connect_serial(self, port_name: str, baud_rate: int = 115200) -> tuple[bool, str]:
+        port_name = (port_name or "").strip()
+        if not port_name:
+            return False, "No COM port selected."
+        if is_capture_card_port(port_name):
+            return False, (
+                f"{port_name} is the HDMI capture card, not telemetry.\n"
+                "Opening it stops the goggles feed. Pick the STM / CP210 / CH340 COM port."
+            )
+
         self.disconnect_serial()
 
         # Attempt 1: Try MSPController (for Betaflight / INAV / MSP)
@@ -241,6 +251,8 @@ class TrackingWorkerThread(QThread):
                 self.is_connected = True
                 self.port_name = port_name
                 self.baud_rate = baud_rate
+                self.sys_config.device.serial_port = port_name
+                self.sys_config.device.baud_rate = baud_rate
                 self.sys_log.log(
                     LogCategory.DRONE,
                     f"Connected to {port_name} @ {baud_rate} (MSP)",
@@ -273,6 +285,8 @@ class TrackingWorkerThread(QThread):
                 self.is_connected = True
                 self.port_name = port_name
                 self.baud_rate = baud_rate
+                self.sys_config.device.serial_port = port_name
+                self.sys_config.device.baud_rate = baud_rate
                 self.sys_log.log(
                     LogCategory.DRONE,
                     f"Connected to {port_name} @ {baud_rate} (MAVLink)",
@@ -357,34 +371,10 @@ class TrackingWorkerThread(QThread):
             target_id=profile.target_id,
         )
 
-    def _open_camera(self, cam_idx: int | str) -> cv2.VideoCapture | None:
-        """Open the goggles HDMI card the same way OBS does: Media Foundation index.
-
-        OpenCV 5 DirectShow cannot open this card by name (it fails instantly).
-        MSMF index 1 is the USB3.0 UHD capture card. Do not open index 0 — that
-        is the laptop webcam and resets USB.
-        """
-        name = str(cam_idx).strip()
-        if name.isdigit() and not _is_capture_card(name):
-            index = int(name)
-            label = name
-        else:
-            index = 1
-            label = _GOGGLES_CAPTURE
-        self.camera_status = f"Opening {label}…"
+    def _try_msmf(self, index: int) -> cv2.VideoCapture | None:
         cap = cv2.VideoCapture(index, cv2.CAP_MSMF)
         if not cap.isOpened():
             cap.release()
-            self.camera_status = (
-                f"{label} — close OBS, then restart (card is in use)"
-                if index == 1
-                else f"{label} — camera did not open"
-            )
-            self.sys_log.log(
-                LogCategory.CAMERA,
-                f"Could not open USB capture index {index} ({label})",
-                severity=LogSeverity.ERROR,
-            )
             return None
         try:
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.sys_config.camera.frame_width)
@@ -392,14 +382,90 @@ class TrackingWorkerThread(QThread):
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         except Exception:
             pass
-        self.active_cam_idx = index
+        return cap
+
+    def _capture_score(self, cap: cv2.VideoCapture) -> int:
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        if w < 640 or h < 360:
+            return 0
+        score = w * h
+        # HDMI grabbers are 720p/1080p; laptop webcams are usually smaller.
+        if w >= 1280 and h >= 720:
+            score += 10_000_000
+        return score
+
+    def _open_camera(self, cam_idx: int | str) -> cv2.VideoCapture | None:
+        """Open the goggles HDMI card via Media Foundation.
+
+        Do not assume MSMF index 1. Plugging in telemetry shifts Windows
+        camera indices, so index 1 can become a webcam / IR cam. Pick the
+        HDMI-sized device instead. DirectShow-by-name fails on this card.
+        """
+        name = str(cam_idx).strip()
+        want_capture = (not name.isdigit()) or _is_capture_card(name)
+        preferred = int(self.sys_config.camera.camera_index)
+        if name.isdigit():
+            preferred = int(name)
+
+        self.camera_status = f"Opening {_GOGGLES_CAPTURE if want_capture else name}…"
+        order: list[int] = []
+        for i in (preferred, 1, 2, 3, 4, 5):
+            if 1 <= i <= 9 and i not in order:
+                order.append(i)
+
+        best_cap: cv2.VideoCapture | None = None
+        best_idx = preferred
+        best_score = -1
+        for index in order:
+            cap = self._try_msmf(index)
+            if cap is None:
+                continue
+            score = self._capture_score(cap)
+            if want_capture and score >= 10_000_000:
+                if best_cap is not None:
+                    best_cap.release()
+                best_cap, best_idx, best_score = cap, index, score
+                break
+            if score > best_score:
+                if best_cap is not None:
+                    best_cap.release()
+                best_cap, best_idx, best_score = cap, index, score
+            else:
+                cap.release()
+
+        # Index 0 is usually the laptop webcam. Opening it can reset USB, so
+        # only try it if no other video device looked like an HDMI grabber.
+        if best_cap is None or (want_capture and best_score < 10_000_000):
+            cap0 = self._try_msmf(0)
+            if cap0 is not None:
+                score0 = self._capture_score(cap0)
+                if score0 > best_score:
+                    if best_cap is not None:
+                        best_cap.release()
+                    best_cap, best_idx, best_score = cap0, 0, score0
+                else:
+                    cap0.release()
+
+        if best_cap is None:
+            self.camera_status = f"{_GOGGLES_CAPTURE} — close OBS, then restart (card is in use)"
+            self.sys_log.log(
+                LogCategory.CAMERA,
+                "Could not open USB capture card (no MSMF device)",
+                severity=LogSeverity.ERROR,
+            )
+            return None
+
+        label = _GOGGLES_CAPTURE if want_capture or best_score >= 10_000_000 else name
+        self.active_cam_idx = best_idx
         self.active_cam_name = label
+        self.sys_config.camera.camera_index = best_idx
         self.camera_status = f"{label} — waiting for goggles HDMI"
         self.sys_log.log(
             LogCategory.CAMERA,
-            f"Opened USB capture card {label} (MSMF index {index})",
+            f"Opened USB capture card {label} (MSMF index {best_idx})",
         )
-        return cap
+        return best_cap
 
     def run(self) -> None:
         self.running = True
@@ -459,8 +525,16 @@ class TrackingWorkerThread(QThread):
                     failed_reads += 1
 
             if not ok or frame is None:
-                # Keep a small status frame. Do not spin a 1280x720 pipeline
-                # with no picture — that is what froze and crashed the UI.
+                # USB re-plug of telemetry can invalidate the MSMF handle.
+                # Only re-open if the device itself died — black HDMI is normal.
+                if cap is None or not cap.isOpened():
+                    if cap is not None:
+                        try:
+                            cap.release()
+                        except Exception:
+                            pass
+                    cap = self._open_camera(_GOGGLES_CAPTURE)
+                    failed_reads = 0
                 if self.active_cam_name:
                     self.camera_status = f"{self.active_cam_name} — waiting for goggles HDMI"
                 frame = np.zeros((360, 640, 3), dtype=np.uint8)

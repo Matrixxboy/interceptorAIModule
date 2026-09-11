@@ -62,7 +62,13 @@ class MSPController(FlightController):
 
     def connect(self) -> bool:
         try:
-            self.ser = serial.Serial(self.port, self.baudrate, timeout=0.1)
+            self.ser = serial.Serial(
+                self.port,
+                self.baudrate,
+                timeout=0.1,
+                dsrdtr=False,
+                rtscts=False,
+            )
             self.logger.info(f"Connected to MSP on {self.port} at {self.baudrate} baud.")
             return True
         except Exception as e:

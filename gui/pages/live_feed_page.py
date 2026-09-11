@@ -355,18 +355,29 @@ class LiveFeedPage(QWidget):
             self.worker.switch_camera(source)
 
     def _refresh_serial_ports(self) -> None:
+        previous = self.combo_ports.currentData()
+        preferred = (self.worker.port_name or self.sys_config.device.serial_port or "").strip()
         self.combo_ports.clear()
         ports = list_serial_ports()
         if not ports:
-            self.combo_ports.addItem("No ports", "")
+            self.combo_ports.addItem("No telemetry ports", "")
             self.combo_ports.setEnabled(False)
             self.btn_connect.setEnabled(False)
-        else:
-            self.combo_ports.setEnabled(True)
-            self.btn_connect.setEnabled(True)
-            for dev, label in ports:
-                short = label if len(label) <= 36 else label[:33] + "…"
-                self.combo_ports.addItem(short, dev)
+            return
+        self.combo_ports.setEnabled(True)
+        self.btn_connect.setEnabled(True)
+        for dev, label in ports:
+            short = label if len(label) <= 42 else label[:39] + "…"
+            self.combo_ports.addItem(short, dev)
+        pick = previous or preferred
+        if pick:
+            idx = self.combo_ports.findData(pick)
+            if idx >= 0:
+                self.combo_ports.setCurrentIndex(idx)
+        baud = int(self.sys_config.device.baud_rate or 115200)
+        bidx = self.combo_baud.findData(baud)
+        if bidx >= 0:
+            self.combo_baud.setCurrentIndex(bidx)
 
     def _toggle_serial_connection(self) -> None:
         if self.worker.is_connected:
