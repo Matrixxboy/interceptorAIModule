@@ -105,6 +105,19 @@ class ParametersPanel(QWidget):
         self.sp_follow_speed = _dspin(c.safety.follow_speed_scale, 0.05, 1.0, 0.05, 2)
         self.sp_follow_pitch = _dspin(c.safety.follow_pitch_scale, 0.1, 1.5, 0.05, 2)
         self.sp_max_lost = _ispin(c.safety.max_lost_frames, 5, 200)
+        self.sp_detect_n = _ispin(c.detection.detect_every_n, 1, 60)
+        self.combo_det_mode = QComboBox()
+        for mode, tip in (
+            ("coco", "COCO nano (airplane/bird proxies)"),
+            ("world", "YOLO-World open-vocab aerial prompts"),
+            ("custom", "Fine-tuned models/drone_missile_best.pt"),
+        ):
+            self.combo_det_mode.addItem(mode, mode)
+            idx = self.combo_det_mode.count() - 1
+            self.combo_det_mode.setItemData(idx, tip, Qt.ItemDataRole.ToolTipRole)
+        mi = self.combo_det_mode.findData(c.detection.mode)
+        self.combo_det_mode.setCurrentIndex(max(0, mi))
+        self.combo_det_mode.setToolTip("Detector mode — custom auto-selects when weights exist")
         self.chk_kalman = QCheckBox("Kalman prediction")
         self.chk_kalman.setChecked(c.prediction.enable_kalman)
 
@@ -123,11 +136,16 @@ class ParametersPanel(QWidget):
             (5, 2, "Follow conf ≥", self.sp_follow_conf),
             (6, 0, "Follow speed", self.sp_follow_speed),
             (6, 2, "Pitch follow", self.sp_follow_pitch),
+            (7, 0, "Detect every N", self.sp_detect_n),
         ]
         for row, col, text, widget in fields:
             grid.addWidget(_lbl(text), row, col)
             grid.addWidget(widget, row, col + 1)
             widget.valueChanged.connect(self._on_param_change)
+
+        grid.addWidget(_lbl("Detect mode"), 7, 2)
+        grid.addWidget(self.combo_det_mode, 7, 3)
+        self.combo_det_mode.currentIndexChanged.connect(self._on_param_change)
 
         self.chk_kalman.toggled.connect(self._on_param_change)
         grid.addWidget(self.chk_kalman, 8, 0, 1, 4)
@@ -160,6 +178,10 @@ class ParametersPanel(QWidget):
         self.sys_config.safety.follow_speed_scale = self.sp_follow_speed.value()
         self.sys_config.safety.follow_pitch_scale = self.sp_follow_pitch.value()
         self.sys_config.safety.max_lost_frames = self.sp_max_lost.value()
+        self.sys_config.detection.detect_every_n = int(self.sp_detect_n.value())
+        mode = self.combo_det_mode.currentData()
+        if mode in ("coco", "world", "custom"):
+            self.sys_config.detection.mode = mode
         self.params_updated.emit()
 
     def _load_selected_preset(self) -> None:
@@ -184,7 +206,7 @@ class ParametersPanel(QWidget):
             self.sp_desired_dist, self.sp_min_dist, self.sp_max_dist, self.sp_known_w,
             self.sp_focal, self.sp_deadzone, self.sp_horiz_off, self.sp_vert_off, self.sp_lead,
             self.sp_conf_thresh, self.sp_follow_conf, self.sp_follow_speed, self.sp_follow_pitch,
-            self.sp_max_lost, self.chk_kalman,
+            self.sp_max_lost, self.sp_detect_n, self.chk_kalman, self.combo_det_mode,
         ]
         for w in widgets:
             w.blockSignals(True)
@@ -203,5 +225,9 @@ class ParametersPanel(QWidget):
         self.sp_follow_speed.setValue(cfg.safety.follow_speed_scale)
         self.sp_follow_pitch.setValue(cfg.safety.follow_pitch_scale)
         self.sp_max_lost.setValue(cfg.safety.max_lost_frames)
+        self.sp_detect_n.setValue(cfg.detection.detect_every_n)
+        mi = self.combo_det_mode.findData(cfg.detection.mode)
+        if mi >= 0:
+            self.combo_det_mode.setCurrentIndex(mi)
         for w in widgets:
             w.blockSignals(False)

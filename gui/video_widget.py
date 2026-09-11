@@ -101,7 +101,10 @@ class VideoDisplayWidget(QLabel):
     def update_frame(self, frame_bgr: np.ndarray) -> None:
         if frame_bgr is None or getattr(frame_bgr, "size", 0) == 0:
             return
-        frame_bgr = np.ascontiguousarray(frame_bgr)
+        try:
+            frame_bgr = np.array(frame_bgr, copy=True)
+        except Exception:
+            return
         self.current_frame = frame_bgr
         h, w = frame_bgr.shape[:2]
         if h < 2 or w < 2:
@@ -118,20 +121,22 @@ class VideoDisplayWidget(QLabel):
             )
             h, w = frame_bgr.shape[:2]
 
-        self._rgb_keep = np.ascontiguousarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
-        bytes_per_line = int(self._rgb_keep.strides[0])
-        qimg = QImage(
-            self._rgb_keep.data, w, h, bytes_per_line, QImage.Format.Format_RGB888
-        )
-        # Fast scale — SmoothTransformation was a major UI hitch
-        pix = QPixmap.fromImage(qimg)
-        self.setPixmap(
-            pix.scaled(
-                self.size(),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.FastTransformation,
+        try:
+            self._rgb_keep = np.ascontiguousarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
+            bytes_per_line = int(self._rgb_keep.strides[0])
+            qimg = QImage(
+                self._rgb_keep.data, w, h, bytes_per_line, QImage.Format.Format_RGB888
             )
-        )
+            pix = QPixmap.fromImage(qimg)
+            self.setPixmap(
+                pix.scaled(
+                    self.size(),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.FastTransformation,
+                )
+            )
+        except Exception:
+            return
 
     def paintEvent(self, event) -> None:
         super().paintEvent(event)

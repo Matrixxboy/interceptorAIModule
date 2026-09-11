@@ -170,7 +170,7 @@ class LiveFeedPage(QWidget):
         self.btn_assist = QPushButton("Follow")
         self.btn_assist.setObjectName("btnSuccess")
         self.btn_assist.setCheckable(True)
-        self.btn_assist.setToolTip("Enable / disable follow assist")
+        self.btn_assist.setToolTip("Follow / Unfollow. Joystick Follow button toggles this too.")
         self.btn_assist.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.btn_assist.toggled.connect(self._on_toggle_assist)
 
@@ -293,6 +293,7 @@ class LiveFeedPage(QWidget):
         root.addWidget(splitter, stretch=1)
 
         self.worker.frame_processed.connect(self._on_frame_processed)
+        self.worker.follow_changed.connect(self._sync_follow_button)
 
     @staticmethod
     def _panel() -> QFrame:
@@ -319,6 +320,7 @@ class LiveFeedPage(QWidget):
         return lbl
 
     def _refresh_camera_devices(self, _checked: bool = False, probe: bool = True) -> None:
+        previous = self.combo_cameras.currentData()
         self.combo_cameras.blockSignals(True)
         self.combo_cameras.clear()
         if probe:
@@ -326,17 +328,31 @@ class LiveFeedPage(QWidget):
         else:
             idx = int(self.sys_config.camera.camera_index)
             devices = [(idx, f"Configured Camera {idx}")]
-        for idx, label in devices:
-            short = label.replace(" (Capture Card / Video Input)", "")
-            if len(short) > 42:
-                short = short[:39] + "…"
-            self.combo_cameras.addItem(short, idx)
+        selected = previous
+        for source, label in devices:
+            short = label if len(label) <= 42 else label[:39] + "…"
+            self.combo_cameras.addItem(short, source)
+            if selected is None and source and "USB capture" in label:
+                selected = source
+        if selected is not None:
+            keep = self.combo_cameras.findData(selected)
+            if keep >= 0:
+                self.combo_cameras.setCurrentIndex(keep)
+            elif probe:
+                # Old numeric index — open the USB capture card by name instead.
+                for i in range(self.combo_cameras.count()):
+                    if "USB capture" in self.combo_cameras.itemText(i):
+                        self.combo_cameras.setCurrentIndex(i)
+                        selected = self.combo_cameras.itemData(i)
+                        break
         self.combo_cameras.blockSignals(False)
+        if probe and selected is not None and selected != previous:
+            self.worker.switch_camera(selected)
 
     def _on_camera_changed(self) -> None:
-        idx = self.combo_cameras.currentData()
-        if idx is not None:
-            self.worker.switch_camera(idx)
+        source = self.combo_cameras.currentData()
+        if source is not None:
+            self.worker.switch_camera(source)
 
     def _refresh_serial_ports(self) -> None:
         self.combo_ports.clear()
@@ -409,8 +425,17 @@ class LiveFeedPage(QWidget):
         self.btn_assist.setChecked(False)
 
     def _on_toggle_assist(self, checked: bool) -> None:
-        self.worker.assist_enabled = checked
-        self.btn_assist.setText("Following" if checked else "Follow")
+        if checked == self.worker.assist_enabled:
+            self.btn_assist.setText("Unfollow" if checked else "Follow")
+            return
+        self.worker.set_follow(checked, source="gui")
+        self.btn_assist.setText("Unfollow" if checked else "Follow")
+
+    def _sync_follow_button(self, enabled: bool) -> None:
+        self.btn_assist.blockSignals(True)
+        self.btn_assist.setChecked(bool(enabled))
+        self.btn_assist.setText("Unfollow" if enabled else "Follow")
+        self.btn_assist.blockSignals(False)
 
     def _on_toggle_arm(self, checked: bool) -> None:
         if checked:
@@ -451,12 +476,6 @@ class LiveFeedPage(QWidget):
                 "color: #3d8f6a; font-family: Consolas, monospace; font-size: 8pt; background: transparent;"
             )
             self.pill_feed.set_status("TRACKING", "ok")
-            # Lock path enables assist in the worker — keep the Follow button in sync
-            if self.worker.assist_enabled and not self.btn_assist.isChecked():
-                self.btn_assist.blockSignals(True)
-                self.btn_assist.setChecked(True)
-                self.btn_assist.setText("Following")
-                self.btn_assist.blockSignals(False)
         else:
             self.lbl_lock.setText("LOCK  NONE")
             self.lbl_lock.setStyleSheet(

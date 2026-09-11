@@ -25,23 +25,79 @@ from telemetry.telemetry_logger import TelemetryLogger, TelemetryRecord
 from vision.camera_geometry import level_reference_line
 
 
-def list_camera_devices(max_test: int = 6) -> list[tuple[int, str]]:
-    """Probe available camera and video capture devices."""
-    devices = []
-    for idx in range(max_test):
-        cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
-        if cap.isOpened():
-            cap.release()
-            devices.append((idx, f"Camera {idx}"))
-    if not devices:
-        devices.append((0, "Default Camera 0 (Synthetic Mode)"))
+_CAPTURE_HINT = ("uhd", "capture", "hdmi", "usb3", "video grab", "video input")
+# Goggles HDMI → this USB capture card. Open by name, never by a guessed index.
+_GOGGLES_CAPTURE = "USB3.0 UHD"
+_device_name_cache: list[str] = []
+
+
+def list_camera_devices(max_test: int = 6) -> list[tuple[str, str]]:
+    """List video devices without opening them.
+
+    Each item is (directshow_name, label). Opening DirectShow here steals the
+    live capture and resets the USB hub, which drops the telemetry COM port.
+    USB capture cards are listed first.
+    """
+    # Do not spawn PowerShell here. That call blocked the UI for several
+    # seconds and the tracking thread. The goggles card has a fixed name.
+    names = list(_device_name_cache) or [_GOGGLES_CAPTURE]
+    if _GOGGLES_CAPTURE not in names:
+        names.insert(0, _GOGGLES_CAPTURE)
+    if not names:
+        return [(_GOGGLES_CAPTURE, f"USB capture — {_GOGGLES_CAPTURE}")]
+    ranked = sorted(names, key=lambda name: (0 if _is_capture_card(name) else 1, name.lower()))
+    devices: list[tuple[str, str]] = []
+    for name in ranked[:max_test]:
+        label = f"USB capture — {name}" if _is_capture_card(name) else name
+        devices.append((name, label))
     return devices
+
+
+def _is_capture_card(name: str) -> bool:
+    low = name.lower()
+    return any(hint in low for hint in _CAPTURE_HINT)
+
+
+def _windows_video_names(max_test: int) -> list[str]:
+    """Friendly names of video-capture devices. Does not open the capture pin."""
+    if not hasattr(cv2, "CAP_DSHOW"):
+        return []
+    try:
+        import subprocess
+
+        script = (
+            "$ErrorActionPreference='SilentlyContinue'; "
+            "Get-PnpDevice -Class Camera -Status OK | "
+            "Where-Object { $_.FriendlyName -and $_.FriendlyName -notmatch 'Audio|Proxy' } | "
+            "Select-Object -ExpandProperty FriendlyName"
+        )
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception:
+        return []
+    names: list[str] = []
+    for line in (proc.stdout or "").splitlines():
+        name = line.strip()
+        if name and name not in names:
+            names.append(name)
+        if len(names) >= max_test:
+            break
+    if names:
+        _device_name_cache.clear()
+        _device_name_cache.extend(names)
+    return names or list(_device_name_cache)
 
 
 class TrackingWorkerThread(QThread):
     frame_processed = pyqtSignal(np.ndarray, object)
     target_changed = pyqtSignal(object)
     fps_updated = pyqtSignal(float)
+    follow_changed = pyqtSignal(bool)
 
     def __init__(
         self,
@@ -57,6 +113,8 @@ class TrackingWorkerThread(QThread):
         self.sys_log = SystemLogger()
         self.running = False
         self.assist_enabled = False
+        self._joy_follow_level = False
+        self._joy_follow_seen = False
         self.arm_requested = False
         self.gui_arm_requested = False
         self.mode_requested = False
@@ -66,8 +124,10 @@ class TrackingWorkerThread(QThread):
         self.port_name = ""
         self.baud_rate = 115200
 
-        self.requested_cam_idx: int | None = self.sys_config.camera.camera_index
+        self.requested_cam_idx: int | str | None = _GOGGLES_CAPTURE
         self.active_cam_idx: int = self.sys_config.camera.camera_index
+        self.active_cam_name: str = ""
+        self.camera_status: str = f"Opening {_GOGGLES_CAPTURE}…"
 
         self.hybrid = HybridYoloLockTracker(
             det_cfg=self.sys_config.detection,
@@ -87,7 +147,7 @@ class TrackingWorkerThread(QThread):
         self.flight_mode: str = "ANGLE"
         self.follow_status: str = "IDLE"  # Why sticks are / aren't AI-driven (HUD)
         self._joy_lock_state: bool = False
-        self._joy_follow_state: bool = False
+        self._joy_follow_level: bool = False
 
     def adjust_throttle(self, delta: int) -> int:
         self.throttle_value = max(1000, min(2000, self.throttle_value + delta))
@@ -119,6 +179,22 @@ class TrackingWorkerThread(QThread):
         )
         return self.flight_mode
 
+    def set_follow(self, enabled: bool, source: str = "gui") -> None:
+        """AI may drive sticks only after an explicit Follow. Lock alone does nothing."""
+        enabled = bool(enabled)
+        changed = self.assist_enabled != enabled
+        self.assist_enabled = enabled
+        self.follow_status = "FOLLOW ON" if enabled else "FOLLOW OFF"
+        if not enabled:
+            self.controller.fade_to_mid(base_throttle=self.throttle_value)
+        if changed:
+            self.follow_changed.emit(enabled)
+            self.sys_log.log(
+                LogCategory.DRONE,
+                f"Follow {'enabled' if enabled else 'disabled'} ({source})",
+                module="Manual Control",
+            )
+
     def arm_drone(self) -> bool:
         self.gui_arm_requested = True
         self.force_disarm = False
@@ -140,7 +216,8 @@ class TrackingWorkerThread(QThread):
             return 0.0
         return sum(self._fps_window) / len(self._fps_window)
 
-    def switch_camera(self, cam_index: int) -> None:
+    def switch_camera(self, cam_index: int | str) -> None:
+        """Switch video source. Name opens that USB device only — no hub probe."""
         self.requested_cam_idx = cam_index
 
     def connect_serial(self, port_name: str, baud_rate: int = 115200) -> tuple[bool, str]:
@@ -222,6 +299,9 @@ class TrackingWorkerThread(QThread):
         self.sys_config = cfg
         self.controller.update_sys_config(cfg)
         self.failsafe.update_config(cfg.safety)
+        if hasattr(self, "hybrid") and hasattr(self.hybrid, "apply_detection_config"):
+            self.hybrid.apply_detection_config(cfg.detection)
+            self.hybrid.tcfg = cfg.tracker
         # Keep MSP ARM/Mode channel mapping in sync with Settings → AUX
         if hasattr(self, "fc") and hasattr(self.fc, "update_aux_config"):
             aux = cfg.aux_channels
@@ -277,48 +357,48 @@ class TrackingWorkerThread(QThread):
             target_id=profile.target_id,
         )
 
-    def _open_camera(self, cam_idx: int) -> cv2.VideoCapture | None:
-        for backend in [cv2.CAP_DSHOW, cv2.CAP_MSMF]:
-            cap = cv2.VideoCapture(cam_idx, backend)
-            if cap.isOpened():
-                # Set MJPG FOURCC for USB capture cards
-                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.sys_config.camera.frame_width)
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.sys_config.camera.frame_height)
-                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                try:
-                    cap.set(
-                        cv2.CAP_PROP_FPS,
-                        max(15.0, min(120.0, float(self.sys_config.camera.target_fps or 60.0))),
-                    )
-                except Exception:
-                    pass
-                
-                # Check if we can read with MJPG
-                ok, frame = cap.read()
-                if ok and frame is not None:
-                    self.active_cam_idx = cam_idx
-                    return cap
-                    
-                # If setting properties broke it, try opening it raw
-                cap.release()
-                cap = cv2.VideoCapture(cam_idx, backend)
-                if cap.isOpened():
-                    ok, frame = cap.read()
-                    if ok and frame is not None:
-                        self.active_cam_idx = cam_idx
-                        return cap
-                cap.release()
-        return None
+    def _open_camera(self, cam_idx: int | str) -> cv2.VideoCapture | None:
+        """Open the goggles HDMI capture card. Do not scan other USB devices."""
+        name = str(cam_idx).strip()
+        if not name or name.isdigit():
+            name = _GOGGLES_CAPTURE
+        self.camera_status = f"Opening {name}…"
+        cap = cv2.VideoCapture()
+        # Bound the hang. A DirectShow open/read with no timeout freezes the UI.
+        if hasattr(cv2, "CAP_PROP_OPEN_TIMEOUT_MSEC"):
+            cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 2500)
+        if hasattr(cv2, "CAP_PROP_READ_TIMEOUT_MSEC"):
+            cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 400)
+        opened = cap.open(f"video={name}", cv2.CAP_DSHOW)
+        if not opened:
+            cap.release()
+            self.camera_status = f"{name} — capture card did not open"
+            self.sys_log.log(
+                LogCategory.CAMERA,
+                f"Could not open USB capture '{name}'",
+                severity=LogSeverity.ERROR,
+            )
+            return None
+        try:
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        except Exception:
+            pass
+        self.active_cam_name = name
+        self.camera_status = f"{name} — waiting for goggles HDMI"
+        self.sys_log.log(LogCategory.CAMERA, f"Opened USB capture card: {name}")
+        return cap
 
     def run(self) -> None:
         self.running = True
         if hasattr(cv2, "setLogLevel"):
             cv2.setLogLevel(cv2.LOG_LEVEL_SILENT)
 
-        cap = self._open_camera(self.requested_cam_idx if self.requested_cam_idx is not None else 0)
-        if cap is None:
-            cap = self._open_camera(1 if self.requested_cam_idx == 0 else 0)
+        # Open the HDMI capture card by name. Do not call PowerShell or
+        # VideoCapture(index) here — both freeze the UI and drop the radio.
+        source = self.requested_cam_idx if self.requested_cam_idx is not None else _GOGGLES_CAPTURE
+        if str(source).isdigit():
+            source = _GOGGLES_CAPTURE
+        cap = self._open_camera(source)
         self.requested_cam_idx = None
 
         self.sys_log.log(LogCategory.SYSTEM, "Tracking pipeline started", module="Worker")
@@ -344,40 +424,44 @@ class TrackingWorkerThread(QThread):
             if self.requested_cam_idx is not None:
                 new_idx = self.requested_cam_idx
                 self.requested_cam_idx = None
-                if cap is not None and cap.isOpened():
-                    cap.release()
-                cap = self._open_camera(new_idx)
-                failed_reads = 0
-                self.sys_log.log(LogCategory.CAMERA, f"Switched to camera {new_idx}")
+                # Closing a USB capture resets the hub and drops the telemetry radio.
+                same = str(new_idx) in (str(self.active_cam_idx), self.active_cam_name)
+                already = cap is not None and cap.isOpened() and same
+                if not already:
+                    if cap is not None and cap.isOpened():
+                        cap.release()
+                    cap = self._open_camera(new_idx)
+                    failed_reads = 0
+                    self.sys_log.log(LogCategory.CAMERA, f"Opened USB video: {new_idx}")
 
             ok = False
             frame = None
             if cap is not None and cap.isOpened():
                 ok, frame = cap.read()
-                if not ok or frame is None:
-                    failed_reads += 1
-                    if failed_reads >= 20:
-                        cap.release()
-                        cap = None
+                if ok and frame is not None:
+                    failed_reads = 0
+                    self.camera_status = self.active_cam_name or "USB capture"
                 else:
-                    failed_reads = 0
-
-            if cap is None and failed_reads >= 20 and (self.frame_count % 30 == 0):
-                cap = self._open_camera(self.active_cam_idx)
-                if cap is not None:
-                    failed_reads = 0
+                    # No HDMI picture. Keep the device open so COM stays up.
+                    failed_reads += 1
 
             if not ok or frame is None:
-                frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+                # Keep a small status frame. Do not spin a 1280x720 pipeline
+                # with no picture — that is what froze and crashed the UI.
+                if self.active_cam_name:
+                    self.camera_status = f"{self.active_cam_name} — waiting for goggles HDMI"
+                frame = np.zeros((360, 640, 3), dtype=np.uint8)
                 cv2.putText(
                     frame,
-                    f"SIMULATED STREAM (Cam {self.active_cam_idx} No Feed / Unplugged)",
-                    (280, 360),
+                    self.camera_status or "USB capture — waiting for goggles HDMI",
+                    (24, 180),
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    0.75,
+                    0.55,
                     (0, 180, 255),
-                    2,
+                    1,
+                    cv2.LINE_AA,
                 )
+                time.sleep(0.2)
 
             self.frame_count += 1
             now = time.time()
@@ -414,7 +498,7 @@ class TrackingWorkerThread(QThread):
                 conf = 0.0
                 source = "none"
 
-                if self.hybrid.locked:
+                if ok and self.hybrid.locked:
                     res = self.hybrid.update(frame)
                     dets = res.detections
                     if res.ok and res.bbox_xywh is not None:
@@ -466,8 +550,9 @@ class TrackingWorkerThread(QThread):
 
                 self._was_locked = locked
 
-                # Camera levelling needs live attitude — poll slowly and only when asked,
-                # since an MSP round-trip on the control loop is expensive.
+                # Attitude only — never get_telemetry() here. That call blocks the
+                # MSP UART (several round-trips) and overwrites fc._armed from
+                # STATUS, which then sends an explicit disarm packet mid-air.
                 if (
                     self.sys_config.camera.stabilize_with_attitude
                     and self.is_connected
@@ -482,6 +567,7 @@ class TrackingWorkerThread(QThread):
                             self.controller.set_vehicle_attitude(
                                 float(att.get("roll_deg", 0.0)),
                                 float(att.get("pitch_deg", 0.0)),
+                                float(att.get("yaw_deg", 0.0)),
                             )
                     except Exception:
                         pass
@@ -538,7 +624,7 @@ class TrackingWorkerThread(QThread):
                                     channel_overrides[int(aux_cfg.rc_channel)] = int(arm_pwm)
                                 break
                     
-                    joy_wants_arm = getattr(self, "arm_requested", False)
+                    joy_wants_arm = False
                     if arm_pwm is not None:
                         pwm_val = int(arm_pwm)
                         if pwm_val > 1600:
@@ -546,18 +632,21 @@ class TrackingWorkerThread(QThread):
                         elif pwm_val < 1400:
                             joy_wants_arm = False
 
-                    # Ensure FC arm channel carries the Arm switch value when mapped
-                    if arm_ch not in channel_overrides and arm_pwm is not None:
-                        channel_overrides[arm_ch] = int(arm_pwm)
+                    # Do not let a noisy/released AUX write ARM low while latched.
+                    # make_rc_channels already forces the ARM channel from arm_requested.
+                    channel_overrides.pop(arm_ch, None)
 
-                    # Remote OR GUI can arm; but GUI explicit disarm overrides remote
+                    # Latch ARM until an explicit disarm (GUI / X). A released or
+                    # glitchy stick must not drop CH5 in flight.
                     if getattr(self, "force_disarm", False):
                         self.arm_requested = False
+                        self.gui_arm_requested = False
                         if not joy_wants_arm:
-                            # Reset the override once the physical switch is flipped off
                             self.force_disarm = False
-                    else:
-                        self.arm_requested = bool(self.gui_arm_requested or joy_wants_arm)
+                    elif joy_wants_arm or self.gui_arm_requested or self.arm_requested:
+                        self.arm_requested = True
+                        if joy_wants_arm:
+                            self.gui_arm_requested = True
 
                     # Mode switch → flight mode
                     mode_ch = int(self.sys_config.aux_channels.mode_channel)
@@ -593,23 +682,33 @@ class TrackingWorkerThread(QThread):
                         self.reset_lock()
                     self._joy_lock_state = joy_wants_lock
 
-                    # Follow switch
-                    follow_pwm = js.aux_pwm.get("Follow")
+                    # Follow AUX:
+                    #   button  — press toggles Follow / Unfollow
+                    #   switch  — high follows, low unfollows
+                    # Either change updates the GUI Follow button.
+                    follow_pwm = None
+                    follow_is_button = True
+                    for i, aux_cfg in enumerate(self.sys_config.joystick.aux_channels):
+                        if "follow" in (aux_cfg.name or "").lower():
+                            follow_pwm = js.aux_pwm.get(f"#{i}", js.aux_pwm.get(aux_cfg.name))
+                            follow_is_button = bool(aux_cfg.is_button)
+                            break
                     if follow_pwm is None:
-                        for i, aux_cfg in enumerate(self.sys_config.joystick.aux_channels):
-                            if "follow" in (aux_cfg.name or "").lower():
-                                follow_pwm = js.aux_pwm.get(f"#{i}")
-                                break
-                    joy_wants_follow = self._joy_follow_state
+                        follow_pwm = js.aux_pwm.get("Follow")
                     if follow_pwm is not None:
-                        pwm_val = int(follow_pwm)
-                        if pwm_val > 1600:
-                            joy_wants_follow = True
-                        elif pwm_val < 1400:
-                            joy_wants_follow = False
-                        # Continuously enforce the physical switch state for follow
-                        self.assist_enabled = joy_wants_follow
-                        self._joy_follow_state = joy_wants_follow
+                        high = int(follow_pwm) > 1600
+                        low = int(follow_pwm) < 1400
+                        if high or low:
+                            if not self._joy_follow_seen:
+                                self._joy_follow_level = high
+                                self._joy_follow_seen = True
+                            elif high != self._joy_follow_level:
+                                self._joy_follow_level = high
+                                if follow_is_button:
+                                    if high:
+                                        self.set_follow(not self.assist_enabled, source="joystick")
+                                else:
+                                    self.set_follow(high, source="joystick")
                 else:
                     self.arm_requested = bool(self.gui_arm_requested)
 
@@ -680,14 +779,10 @@ class TrackingWorkerThread(QThread):
                             self.fc.set_channel_overrides(channel_overrides)
                         if hasattr(self.fc, "set_flight_mode"):
                             self.fc.set_flight_mode(self.flight_mode)
-                        # Keep _armed in sync with requested state; send_control carries ARM AUX
-                        if self.arm_requested != getattr(self.fc, "_armed", False):
-                            if self.arm_requested:
-                                self.fc.arm()
-                            else:
-                                self.fc.disarm()
-                        else:
-                            # Still refresh _armed flag so send_control keeps AUX high/low
+                        # Do not call fc.disarm()/arm() here. Those send a one-shot
+                        # packet with throttle=1000, and disarm() drops the ARM channel.
+                        # send_control already writes ARM from the latched flag.
+                        if hasattr(self.fc, "_armed"):
                             self.fc._armed = bool(self.arm_requested)
 
                         self.fc.send_control(roll=roll, pitch=pitch, yaw=yaw, throttle=throttle)
@@ -744,7 +839,8 @@ class TrackingWorkerThread(QThread):
                         latency_ms=frame_ms,
                     )
 
-                self.frame_processed.emit(frame, rec)
+                if ok or self.frame_count % 8 == 0:
+                    self.frame_processed.emit(frame.copy(), rec)
             except Exception as exc:
                 self.sys_log.log(
                     LogCategory.SYSTEM,
@@ -834,79 +930,49 @@ class TrackingWorkerThread(QThread):
             vt = ctrl.last_kalman_3d_vel
             tgt_speed = math.sqrt(vt[0]**2 + vt[1]**2 + vt[2]**2)
 
-        # ═══════════════════════════════════════════════════════
-        # RIGHT-SIDE INTERCEPTOR GAUGE (Closing Rate Scale)
-        # ═══════════════════════════════════════════════════════
-        gauge_x = w - 45          # X position of gauge bar
-        gauge_top = 80            # Top of gauge
-        gauge_bot = h - 100       # Bottom of gauge
-        gauge_h = gauge_bot - gauge_top
-        gauge_w = 18              # Width of gauge bar
+        # Interceptor gauge and PPN block only while Follow is on.
+        if self.assist_enabled:
+            gauge_x = w - 45
+            gauge_top = 80
+            gauge_bot = h - 100
+            gauge_h = gauge_bot - gauge_top
+            gauge_w = 18
 
-        # Gauge background
-        cv2.rectangle(frame, (gauge_x, gauge_top), (gauge_x + gauge_w, gauge_bot), (40, 40, 40), -1)
-        cv2.rectangle(frame, (gauge_x, gauge_top), (gauge_x + gauge_w, gauge_bot), (120, 120, 120), 1)
+            cv2.rectangle(frame, (gauge_x, gauge_top), (gauge_x + gauge_w, gauge_bot), (40, 40, 40), -1)
+            cv2.rectangle(frame, (gauge_x, gauge_top), (gauge_x + gauge_w, gauge_bot), (120, 120, 120), 1)
 
-        # Fill level based on closing rate (0..20 m/s mapped to 0..1)
-        max_closing = 20.0
-        fill_frac = max(0.0, min(1.0, closing_rate / max_closing))
-        fill_h = int(gauge_h * fill_frac)
-        if fill_h > 0:
-            # Color: green when closing, red when opening
-            if closing_rate > 0:
-                bar_color = (0, 220, 80)
-            else:
-                bar_color = (0, 0, 220)
-            cv2.rectangle(
-                frame,
-                (gauge_x + 1, gauge_bot - fill_h),
-                (gauge_x + gauge_w - 1, gauge_bot),
-                bar_color, -1,
-            )
+            max_closing = 20.0
+            fill_frac = max(0.0, min(1.0, closing_rate / max_closing))
+            fill_h = int(gauge_h * fill_frac)
+            if fill_h > 0:
+                bar_color = (0, 220, 80) if closing_rate > 0 else (0, 0, 220)
+                cv2.rectangle(
+                    frame,
+                    (gauge_x + 1, gauge_bot - fill_h),
+                    (gauge_x + gauge_w - 1, gauge_bot),
+                    bar_color, -1,
+                )
 
-        # Tick marks every 5 m/s
-        for tick_val in range(0, int(max_closing) + 1, 5):
-            tick_y = gauge_bot - int(gauge_h * tick_val / max_closing)
-            cv2.line(frame, (gauge_x - 4, tick_y), (gauge_x, tick_y), (180, 180, 180), 1)
-            cv2.putText(frame, str(tick_val), (gauge_x - 28, tick_y + 4),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.32, (180, 180, 180), 1, cv2.LINE_AA)
+            for tick_val in range(0, int(max_closing) + 1, 5):
+                tick_y = gauge_bot - int(gauge_h * tick_val / max_closing)
+                cv2.line(frame, (gauge_x - 4, tick_y), (gauge_x, tick_y), (180, 180, 180), 1)
 
-        # Gauge label
-        cv2.putText(frame, "CLR", (gauge_x - 2, gauge_top - 8),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, (180, 220, 255), 1, cv2.LINE_AA)
-        cv2.putText(frame, "m/s", (gauge_x - 4, gauge_bot + 16),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.32, (140, 140, 140), 1, cv2.LINE_AA)
-
-        # ═══════════════════════════════════════════════════════
-        # TOP-RIGHT INTERCEPTOR INFO BLOCK
-        # ═══════════════════════════════════════════════════════
-        info_x = w - 220
-        info_y = 28
-        line_h = 22
-
-        cv2.putText(frame, "INTERCEPTOR", (info_x, info_y),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 200, 255), 2, cv2.LINE_AA)
-        info_y += line_h + 4
-
-        cv2.putText(frame, f"TTI: {tti_text}", (info_x, info_y),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.50,
-                    (0, 255, 255) if tti_text == "---" else (0, 0, 255), 1, cv2.LINE_AA)
-        info_y += line_h
-
-        cv2.putText(frame, f"TGT SPD: {tgt_speed:.1f} m/s", (info_x, info_y),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 165, 255), 1, cv2.LINE_AA)
-        info_y += line_h
-
-        cv2.putText(frame, f"CLR: {closing_rate:+.1f} m/s", (info_x, info_y),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45,
-                    (0, 220, 80) if closing_rate > 0 else (0, 0, 220), 1, cv2.LINE_AA)
-        info_y += line_h
-
-        if hasattr(ctrl, "last_a_P") and ctrl.last_a_P is not None:
-            ap = ctrl.last_a_P
-            a_mag = math.sqrt(float(ap[0])**2 + float(ap[1])**2 + float(ap[2])**2)
-            cv2.putText(frame, f"PPN: {a_mag:.1f} m/s2", (info_x, info_y),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 100, 255), 1, cv2.LINE_AA)
+            info_x = w - 220
+            info_y = 28
+            line_h = 22
+            cv2.putText(frame, "INTERCEPTOR", (info_x, info_y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 200, 255), 2, cv2.LINE_AA)
+            info_y += line_h + 4
+            cv2.putText(frame, f"TTI: {tti_text}", (info_x, info_y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.50,
+                        (0, 255, 255) if tti_text == "---" else (0, 0, 255), 1, cv2.LINE_AA)
+            info_y += line_h
+            cv2.putText(frame, f"TGT SPD: {tgt_speed:.1f} m/s", (info_x, info_y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 165, 255), 1, cv2.LINE_AA)
+            info_y += line_h
+            cv2.putText(frame, f"CLR: {closing_rate:+.1f} m/s", (info_x, info_y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                        (0, 220, 80) if closing_rate > 0 else (0, 0, 220), 1, cv2.LINE_AA)
 
         # ═══════════════════════════════════════════════════════
         # TARGET LOCK BOX + INTERCEPTION VISUALS
@@ -941,9 +1007,12 @@ class TrackingWorkerThread(QThread):
             # Target centre dot
             cv2.circle(frame, (obj_cx, obj_cy), 4, (0, 255, 255), -1)
 
-            # Interception point + steering lines
-            has_intercept = (hasattr(ctrl, "last_intercept_pt")
-                             and ctrl.last_intercept_pt is not None)
+            # Interception point + steering lines only while Follow is on
+            has_intercept = (
+                self.assist_enabled
+                and hasattr(ctrl, "last_intercept_pt")
+                and ctrl.last_intercept_pt is not None
+            )
             if has_intercept:
                 int_x = int(ctrl.last_intercept_pt[0])
                 int_y = int(ctrl.last_intercept_pt[1])
@@ -1005,8 +1074,8 @@ class TrackingWorkerThread(QThread):
                     (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.6, header_color, 2)
 
         cv2.putText(frame,
-                    f"CAM:{self.active_cam_idx}  FPS:{self.current_fps:.0f}  "
-                    f"AETR R:{roll} P:{pitch} Y:{yaw} T:{throttle}  "
+                    f"CAM:{self.active_cam_name or self.active_cam_idx}  FPS:{self.current_fps:.0f}  "
+                    f"{'FOLLOW' if self.assist_enabled else 'LOCKED ONLY'}  "
                     f"SERIAL:{'OK' if self.is_connected else 'OFF'}",
                     (20, h - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
 

@@ -8,6 +8,8 @@ Implements the guidance law from the thesis (Equations 28-32):
   ψ_ref = atan2(v_Py, v_Px)                -- Eq 32
 """
 
+from __future__ import annotations
+
 import numpy as np
 
 
@@ -23,9 +25,13 @@ class PPNGuidance:
         self.b = b
         self.C_b = C_b
         self.v_P_prev: np.ndarray | None = None
+        self.last_omega: np.ndarray = np.zeros(3, dtype=np.float64)
+        self.last_omega_norm: float = 0.0
 
     def reset(self) -> None:
         self.v_P_prev = None
+        self.last_omega = np.zeros(3, dtype=np.float64)
+        self.last_omega_norm = 0.0
 
     def compute_guidance(
         self,
@@ -54,6 +60,8 @@ class PPNGuidance:
 
         r_norm_sq = float(np.dot(r, r))
         if r_norm_sq < 1e-6:
+            self.last_omega = np.zeros(3, dtype=np.float64)
+            self.last_omega_norm = 0.0
             return np.zeros(3), np.zeros(3), 0.0
 
         r_norm = np.sqrt(r_norm_sq)
@@ -63,6 +71,8 @@ class PPNGuidance:
 
         # Eq 29: Line-of-sight angular rate
         omega = np.cross(r, v_rel) / r_norm_sq
+        self.last_omega = omega.copy()
+        self.last_omega_norm = float(np.linalg.norm(omega))
 
         # Eq 28: PPN acceleration command
         a_P = self.N_p * np.cross(v_I, omega)

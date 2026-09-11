@@ -73,6 +73,7 @@ class MainWindow(QMainWindow):
         # Start worker thread
         self.worker = TrackingWorkerThread(self.sys_config)
         self.worker.frame_processed.connect(self._on_frame_processed)
+        self.worker.follow_changed.connect(self._sync_follow_button)
         self.worker.start()
 
     def _init_ui(self) -> None:
@@ -213,6 +214,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("System initialized. Select video capture device or COM port.")
 
     def _refresh_camera_devices(self, _checked: bool = False, probe: bool = True) -> None:
+        previous = self.combo_cameras.currentData()
         self.combo_cameras.blockSignals(True)
         self.combo_cameras.clear()
         if probe:
@@ -220,15 +222,31 @@ class MainWindow(QMainWindow):
         else:
             idx = int(self.sys_config.camera.camera_index)
             devices = [(idx, f"Configured Camera {idx}")]
-        for idx, label in devices:
-            self.combo_cameras.addItem(label, idx)
+        selected = previous
+        for source, label in devices:
+            self.combo_cameras.addItem(label, source)
+            if selected is None and "USB capture" in label:
+                selected = source
+        if selected is not None:
+            keep = self.combo_cameras.findData(selected)
+            if keep >= 0:
+                self.combo_cameras.setCurrentIndex(keep)
+            elif probe:
+                for i in range(self.combo_cameras.count()):
+                    if "USB capture" in self.combo_cameras.itemText(i):
+                        self.combo_cameras.setCurrentIndex(i)
+                        selected = self.combo_cameras.itemData(i)
+                        break
         self.combo_cameras.blockSignals(False)
+        if probe and selected is not None and selected != previous:
+            self.worker.switch_camera(selected)
+            self.statusBar().showMessage(f"USB video: {selected}")
 
     def _on_camera_changed(self) -> None:
-        cam_idx = self.combo_cameras.currentData()
-        if cam_idx is not None:
-            self.worker.switch_camera(cam_idx)
-            self.statusBar().showMessage(f"Switching video source to Camera {cam_idx}...")
+        source = self.combo_cameras.currentData()
+        if source is not None:
+            self.worker.switch_camera(source)
+            self.statusBar().showMessage(f"USB video: {source}")
 
     def _refresh_serial_ports(self) -> None:
         self.combo_ports.clear()
@@ -294,8 +312,17 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Tracking Lock Reset.")
 
     def _on_toggle_assist(self, checked: bool) -> None:
-        self.worker.assist_enabled = checked
-        self.btn_assist.setText("Disable Assist" if checked else "Enable Assist (Follow)")
+        if checked == self.worker.assist_enabled:
+            self.btn_assist.setText("Unfollow" if checked else "Enable Assist (Follow)")
+            return
+        self.worker.set_follow(checked, source="gui")
+        self.btn_assist.setText("Unfollow" if checked else "Enable Assist (Follow)")
+
+    def _sync_follow_button(self, enabled: bool) -> None:
+        self.btn_assist.blockSignals(True)
+        self.btn_assist.setChecked(bool(enabled))
+        self.btn_assist.setText("Unfollow" if enabled else "Enable Assist (Follow)")
+        self.btn_assist.blockSignals(False)
 
     def _on_toggle_arm(self, checked: bool) -> None:
         self.worker.arm_requested = checked

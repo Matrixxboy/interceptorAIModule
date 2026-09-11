@@ -1,5 +1,5 @@
 """
-Fine-tune YOLO on a drone/missile dataset (best long-term accuracy).
+Fine-tune YOLO on a drone/missile dataset (best long-term lock accuracy).
 
 Usage:
   1. Put a Ultralytics-format dataset under datasets/drone_missile/
@@ -8,10 +8,11 @@ Usage:
        names: {0: drone, 1: missile, 2: aircraft}
   3. Run:
        python scripts/train_drone_missile.py
+       python scripts/train_drone_missile.py --base yolo11n.pt --epochs 80
 
 Output weights: models/drone_missile_best.pt
-Then set in config.py:
-  DetectionConfig.mode = "custom"
+Then set Detection mode to "custom" in Live Feed → Params (or leave coco —
+custom auto-selects when the file exists).
 """
 
 from __future__ import annotations
@@ -33,11 +34,11 @@ def main() -> None:
     parser.add_argument(
         "--base",
         type=str,
-        default="yolov8s.pt",
-        help="Base pretrained weights",
+        default="yolo11n.pt",
+        help="Base pretrained weights (mobile nano default)",
     )
     parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--imgsz", type=int, default=960)
+    parser.add_argument("--imgsz", type=int, default=640)
     parser.add_argument("--batch", type=int, default=8)
     parser.add_argument("--device", type=str, default="0")
     args = parser.parse_args()
@@ -47,7 +48,8 @@ def main() -> None:
         raise SystemExit(
             f"Dataset yaml not found: {data}\n"
             "Create datasets/drone_missile/data.yaml first "
-            "(see datasets/drone_missile/data.yaml.example)."
+            "(see datasets/drone_missile/data.yaml.example).\n"
+            "Capture frames with: python scripts/capture_lock_frames.py"
         )
 
     from ultralytics import YOLO
@@ -80,7 +82,7 @@ def main() -> None:
     if best.is_file():
         out.write_bytes(best.read_bytes())
         print(f"Copied best weights → {out}")
-        print('Set DetectionConfig.mode = "custom" in config.py to use them.')
+        print('Set Detection mode to "custom" in Params (or keep coco — auto-uses custom).')
     else:
         print(f"Training finished but best.pt not found at {best}")
 

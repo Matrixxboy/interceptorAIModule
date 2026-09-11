@@ -76,6 +76,14 @@ class SafetyConfig:
     max_forward_speed: float = 350.0  # max pitch µs offset forward
     max_backward_speed: float = 250.0  # max pitch µs offset backward
     max_acceleration: float = 1800.0  # µs/s^2 acceleration limit
+    # PPN guidance (additive to visual PID) — live-tunable
+    ppn_enabled: bool = True
+    ppn_n: float = 3.0  # Navigation constant N_p (typically 3–5)
+    ppn_gain: float = 30.0  # µs per (m/s²) stick bias
+    ppn_yaw_lead_gain: float = 80.0  # µs per (rad/s) LOS-rate yaw lead
+    ppn_min_speed_ms: float = 0.3  # Min |v_t| before PPN engages
+    ppn_gate_m: float = 8.0  # Innovation gate (m) for 3D measurement accept
+    ppn_fade_near_m: float = 2.0  # Fade PN authority within this of desired range
 
 
 @dataclass
@@ -108,6 +116,7 @@ class CameraConfig:
 class DetectionConfig:
     mode: DetectionMode = "coco"
     weights_path: str = "yolo11n.pt"
+    model_name: str = "yolo11n.pt"  # Alias used by YOLO-World / presets
     model_path: Path = field(default_factory=lambda: MODELS_DIR / "yolo11n.pt")
     custom_weights: Path = field(
         default_factory=lambda: MODELS_DIR / "drone_missile_best.pt"
@@ -122,8 +131,18 @@ class DetectionConfig:
     max_box_area_frac: float = 0.35
     device: str = "auto"  # "auto" | "cuda" | "cpu"
     half: bool = True
-    detect_every_n: int = 3
+    detect_every_n: int = 6  # YOLO cadence while locked (hybrid reads this)
+    detect_every_n_healthy: int = 24  # Slower cadence when scale-lock score is strong
     augment: bool = False
+
+    def resolved_mode(self) -> DetectionMode:
+        """Prefer custom weights when present and mode is coco (auto-upgrade)."""
+        custom = Path(self.custom_weights)
+        if self.mode == "custom":
+            return "custom" if custom.is_file() else "coco"
+        if self.mode == "coco" and custom.is_file():
+            return "custom"
+        return self.mode
 
 
 @dataclass

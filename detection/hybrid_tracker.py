@@ -59,7 +59,7 @@ class HybridYoloLockTracker:
         det_cfg: DetectionConfig | None = None,
         tracker_cfg: TrackerConfig | None = None,
         cv_kind: CvKind = "csrt",
-        yolo_every_n: int = 12,
+        yolo_every_n: int | None = None,
         reacquire_iou: float = 0.25,
         max_hold_frames: int = 20,
     ) -> None:
@@ -68,7 +68,13 @@ class HybridYoloLockTracker:
         # Prefer config lock_tracker when set
         cfg_kind = getattr(self.tcfg, "lock_tracker", cv_kind)
         self.cv_kind: CvKind = cfg_kind if cfg_kind in ("csrt", "kcf") else cv_kind
-        self.yolo_every_n = max(1, int(yolo_every_n))
+        # Cadence from DetectionConfig.detect_every_n (fallback 6)
+        n = yolo_every_n if yolo_every_n is not None else getattr(self.det_cfg, "detect_every_n", 6)
+        self.yolo_every_n = max(1, int(n))
+        self.yolo_every_n_healthy = max(
+            self.yolo_every_n,
+            int(getattr(self.det_cfg, "detect_every_n_healthy", 24)),
+        )
         self.reacquire_iou = reacquire_iou
         self.max_hold_frames = max_hold_frames
 
@@ -91,6 +97,24 @@ class HybridYoloLockTracker:
         self._detector_error: str | None = None
         self._vx, self._vy = 0.0, 0.0
 
+    def apply_detection_config(self, det_cfg: DetectionConfig) -> None:
+        """Live-update cadence / conf from SystemConfig without reloading YOLO mid-frame."""
+        prev_mode = getattr(self.det_cfg, "mode", None)
+        prev_custom = str(getattr(self.det_cfg, "custom_weights", ""))
+        self.det_cfg = det_cfg
+        self.yolo_every_n = max(1, int(getattr(det_cfg, "detect_every_n", 6)))
+        self.yolo_every_n_healthy = max(
+            self.yolo_every_n,
+            int(getattr(det_cfg, "detect_every_n_healthy", 24)),
+        )
+        # Force reload if mode or custom weights path changed
+        new_custom = str(getattr(det_cfg, "custom_weights", ""))
+        if self.detector is not None and (
+            prev_mode != det_cfg.mode or prev_custom != new_custom
+        ):
+            self.detector = None
+            self._detector_error = None
+            log.info("YOLO will reload on next detect (mode/weights changed)")
     def ensure_detector(self) -> YOLODetector:
         if self._detector_error is not None:
             raise RuntimeError(self._detector_error)
@@ -233,7 +257,7 @@ class HybridYoloLockTracker:
         if not self._locked:
             run_yolo = True
         elif self.scale_lock.locked and self.scale_lock.last_score >= 0.50:
-            run_yolo = (self._frame_i % 24) == 0
+            run_yolo = (self._frame_i % self.yolo_every_n_healthy) == 0
         else:
             run_yolo = (self._frame_i % self.yolo_every_n) == 0
 

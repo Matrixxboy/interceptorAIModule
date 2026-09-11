@@ -34,7 +34,7 @@ class YOLODetector:
         self._load()
 
     def _resolve_weights(self) -> str:
-        mode = self.cfg.mode
+        mode = self.cfg.resolved_mode() if hasattr(self.cfg, "resolved_mode") else self.cfg.mode
         MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
         if mode == "custom":
@@ -42,27 +42,30 @@ class YOLODetector:
             if custom.is_file():
                 return str(custom)
             log.warning(
-                "Custom weights missing at %s — falling back to YOLO-World",
+                "Custom weights missing at %s — falling back to coco nano",
                 custom,
             )
-            mode = "world"
+            mode = "coco"
 
         if mode == "coco":
             for candidate in (
                 ROOT / "yolo11n.pt",
                 MODELS_DIR / "yolo11n.pt",
+                Path(getattr(self.cfg, "weights_path", "") or ""),
+                Path(getattr(self.cfg, "model_path", "") or ""),
                 ROOT / "yolov8n.pt",
                 MODELS_DIR / "yolov8n.pt",
             ):
-                if candidate.is_file():
-                    return str(candidate)                           
+                if candidate and Path(candidate).is_file():
+                    return str(candidate)
             return "yolo11n.pt"
 
-        # world (default)
+        # world
         path = Path(self.cfg.model_path)
         if path.is_file():
             return str(path)
-        name = self.cfg.model_name
+        name = getattr(self.cfg, "model_name", None) or getattr(self.cfg, "weights_path", "") or ""
+        name = str(name)
         if "world" not in name.lower():
             name = "yolo11s-world.pt"
         return name
@@ -75,11 +78,13 @@ class YOLODetector:
                 "ultralytics is required. Install with: pip install ultralytics"
             ) from exc
 
+        effective_mode = self.cfg.resolved_mode() if hasattr(self.cfg, "resolved_mode") else self.cfg.mode
         weights = self._resolve_weights()
-        self._is_world = "world" in Path(weights).name.lower() or self.cfg.mode == "world"
+        self._is_world = "world" in Path(weights).name.lower() or effective_mode == "world"
         log.info(
-            "Loading YOLO mode=%s weights=%s device=%s half=%s imgsz=%d",
+            "Loading YOLO mode=%s (effective=%s) weights=%s device=%s half=%s imgsz=%d",
             self.cfg.mode,
+            effective_mode,
             weights,
             self.device,
             self.half,
@@ -187,7 +192,8 @@ class YOLODetector:
             ids = r0.boxes.id.detach().cpu().numpy().astype(int)
 
         class_filter: Sequence[int] = ()
-        if self.cfg.mode == "coco":
+        effective = self.cfg.resolved_mode() if hasattr(self.cfg, "resolved_mode") else self.cfg.mode
+        if effective == "coco":
             class_filter = self.cfg.class_filter
 
         for i in range(len(xyxy)):

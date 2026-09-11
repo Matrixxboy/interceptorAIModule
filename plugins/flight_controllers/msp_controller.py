@@ -197,7 +197,10 @@ class MSPController(FlightController):
                 status_data = msp_link.parse_msp_status_ex(resp[1])
                 if status_data:
                     telemetry.update(status_data)
-                    self._armed = status_data.get("armed", False)
+                    # Report FC arm state, but do not overwrite the command latch.
+                    # A false STATUS read used to flip _armed and the control loop
+                    # then sent an explicit disarm while airborne.
+                    telemetry["fc_armed"] = status_data.get("armed", False)
 
             self.ser.write(msp_link.build_msp_request(msp_link.MSP_ALTITUDE))
             resp = msp_link.read_msp_response(self.ser)
