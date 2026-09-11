@@ -163,11 +163,11 @@ def _compact_spin_style() -> str:
     return (
         "QSpinBox, QDoubleSpinBox {"
         "  font-size: 8pt; font-weight: 600; min-height: 22px; padding: 1px 4px;"
-        "  color: #e6e9ef; background: #13161b; border: 1px solid #2a3038; border-radius: 3px;"
+        "  color: #E8EAEF; background: #0B0E12; border: 1px solid #242932; border-radius: 6px;"
         "}"
         "QSpinBox::up-button, QSpinBox::down-button,"
         "QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {"
-        "  width: 14px; border-left: 1px solid #2a3038; background: #1e2329;"
+        "  width: 14px; border-left: 1px solid #242932; background: #151920;"
         "}"
     )
 
@@ -195,7 +195,7 @@ def _axis_spin(value: int) -> QSpinBox:
 
 def _form_lbl(text: str) -> QLabel:
     lab = QLabel(text)
-    lab.setStyleSheet("color: #9aa3b2; font-size: 7.5pt; background: transparent;")
+    lab.setStyleSheet("color: #A8B0BA; font-size: 7.5pt; background: transparent;")
     return lab
 
 
@@ -216,7 +216,7 @@ class StickConfigRow(QFrame):
         name = QLabel(title)
         name.setFixedWidth(58)
         name.setStyleSheet(
-            "color: #e6e9ef; font-size: 8pt; font-weight: 650; background: transparent;"
+            "color: #E8EAEF; font-size: 8pt; font-weight: 650; background: transparent;"
         )
         row.addWidget(name)
 
@@ -357,7 +357,7 @@ class AuxConfigRow(QFrame):
         root.addLayout(row)
 
         self.lbl_warn = QLabel("")
-        self.lbl_warn.setStyleSheet("color: #b08a3c; font-size: 7.5pt; background: transparent;")
+        self.lbl_warn.setStyleSheet("color: #B89A5A; font-size: 7.5pt; background: transparent;")
         self.lbl_warn.setVisible(False)
         root.addWidget(self.lbl_warn)
         self._refresh_conflict()
@@ -528,7 +528,7 @@ class JoystickPage(QWidget):
             "one input → one channel (duplicates are auto-fixed)."
         )
         hint.setWordWrap(True)
-        hint.setStyleSheet("color: #9aa3b2; font-size: 8pt; background: transparent;")
+        hint.setStyleSheet("color: #A8B0BA; font-size: 8pt; background: transparent;")
         cfg_layout.addWidget(hint)
 
         scroll = QScrollArea()
@@ -575,7 +575,7 @@ class JoystickPage(QWidget):
 
         aux_hdr = QLabel("AUX → Flight Controller  (unique CH + unique Joy per row)")
         aux_hdr.setStyleSheet(
-            "color: #9aa3b2; font-size: 8.5pt; font-weight: 650; background: transparent; padding-top: 4px;"
+            "color: #A8B0BA; font-size: 8.5pt; font-weight: 650; background: transparent; padding-top: 4px;"
         )
         self.cfg_form.addWidget(aux_hdr)
         for aux in self.sys_config.joystick.aux_channels:

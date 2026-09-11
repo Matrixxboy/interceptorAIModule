@@ -13,15 +13,16 @@ from PyQt6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QVBoxLayout, QWidg
 
 from telemetry.telemetry_logger import TelemetryRecord
 
-pg.setConfigOptions(antialias=True, background="#0f1115", foreground="#9aa3b2")
+pg.setConfigOptions(antialias=True, background="#050607", foreground="#A8B0BA")
 
-# Clean slate chart palette
-C_PRIMARY = "#4f7cac"
-C_SECONDARY = "#b05656"
-C_OK = "#3d8f6a"
-C_WARN = "#b08a3c"
-C_MUTE = "#6b7380"
-C_GRID = "#2a3038"
+# Instrumentation chart palette (no glow)
+C_PRIMARY = "#6287C7"
+C_SECONDARY = "#B84A52"
+C_OK = "#5FAF83"
+C_WARN = "#B89A5A"
+C_MUTE = "#6E7682"
+C_GRID = "#242932"
+C_ACCENT = "#9D3FF5"
 
 
 def _make_pen(color: str, width: float = 2.0) -> pg.mkPen:
@@ -41,19 +42,19 @@ class ChartPanel(QWidget):
         header.setContentsMargins(4, 0, 4, 0)
         self.lbl_title = QLabel(title)
         self.lbl_title.setStyleSheet(
-            "color: #9aa3b2; font-size: 8.5pt; font-weight: 600; letter-spacing: 1px;"
+            "color: #A8B0BA; font-size: 8.5pt; font-weight: 600; letter-spacing: 1px;"
         )
         self.lbl_value = QLabel("--")
         self.lbl_value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.lbl_value.setStyleSheet(
-            "color: #e6e9ef; font-size: 9.5pt; font-family: Consolas, 'Courier New', monospace;"
+            "color: #E8EAEF; font-size: 9.5pt; font-family: Consolas, 'Courier New', monospace;"
         )
         header.addWidget(self.lbl_title)
         header.addWidget(self.lbl_value, stretch=1)
         root.addLayout(header)
 
         self.plot = pg.PlotWidget()
-        self.plot.setBackground("#171a1f")
+        self.plot.setBackground("#101318")
         self.plot.showGrid(x=True, y=True, alpha=0.2)
         self.plot.setMenuEnabled(False)
         self.plot.hideButtons()
@@ -74,7 +75,7 @@ class ChartPanel(QWidget):
 
         root.addWidget(self.plot, stretch=1)
 
-    def set_value_text(self, text: str, color: str = "#e6e9ef") -> None:
+    def set_value_text(self, text: str, color: str = "#E8EAEF") -> None:
         self.lbl_value.setText(text)
         self.lbl_value.setStyleSheet(
             f"color: {color}; font-size: 10pt; font-family: Consolas, 'Courier New', monospace;"
@@ -116,7 +117,7 @@ class RealTimeTelemetryPlots(QWidget):
             pen=_make_pen(C_PRIMARY, 2.0),
             name="Err X",
             fillLevel=0,
-            brush=pg.mkBrush(79, 124, 172, 28),
+            brush=pg.mkBrush(98, 135, 199, 22),
         )
         self.curve_err_y = self.panel_err.plot.plot(pen=_make_pen(C_SECONDARY, 2.0), name="Err Y")
 
@@ -128,7 +129,7 @@ class RealTimeTelemetryPlots(QWidget):
             pen=_make_pen(C_OK, 2.0),
             name="Distance",
             fillLevel=0,
-            brush=pg.mkBrush(61, 143, 106, 30),
+            brush=pg.mkBrush(95, 175, 131, 22),
         )
 
         # --- Confidence ---
@@ -143,7 +144,7 @@ class RealTimeTelemetryPlots(QWidget):
             pen=_make_pen(C_WARN, 2.0),
             name="Confidence",
             fillLevel=0,
-            brush=pg.mkBrush(160, 138, 92, 28),
+            brush=pg.mkBrush(184, 154, 90, 22),
         )
 
         # --- RC commands ---
@@ -153,7 +154,7 @@ class RealTimeTelemetryPlots(QWidget):
         self.panel_cmd.plot.addItem(
             pg.InfiniteLine(pos=1500, angle=0, pen=pg.mkPen(C_MUTE, width=1, style=Qt.PenStyle.DashLine))
         )
-        self.curve_yaw = self.panel_cmd.plot.plot(pen=_make_pen("#9aa3b2", 2.0), name="Yaw")
+        self.curve_yaw = self.panel_cmd.plot.plot(pen=_make_pen("#A8B0BA", 2.0), name="Yaw")
         self.curve_pitch = self.panel_cmd.plot.plot(pen=_make_pen(C_PRIMARY, 2.0), name="Pitch")
 
         layout.addWidget(self.panel_err, 0, 0)

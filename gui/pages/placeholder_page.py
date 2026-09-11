@@ -22,8 +22,8 @@ class PlaceholderPage(QWidget):
 
         panel = Panel("Integration Status")
         body = QLabel(
-            f"<p style='color:#94a3b8; margin:0;'>{description}</p>"
-            "<p style='color:#475569; margin-top:12px;'>"
+            f"<p style='color:#A8B0BA; margin:0;'>{description}</p>"
+            "<p style='color:#6E7682; margin-top:12px;'>"
             "This subsystem is registered in the Arjuna navigation shell and ready for expansion. "
             "Core tracking, telemetry, and target-database workflows are available from the "
             "primary operational pages."

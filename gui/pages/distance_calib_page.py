@@ -99,7 +99,7 @@ class DistanceCalibPage(QWidget):
         self.kpi_dist = MetricCard("Distance", "-- m", "line of sight", PALETTE["ok"])
         self.kpi_size = MetricCard("Box size", "-- px", "measured axis", PALETTE["accent"])
         self.kpi_w = MetricCard("Width", "-- px", "bbox W", PALETTE["info"])
-        self.kpi_h = MetricCard("Height", "-- px", "bbox H", "#c9a227")
+        self.kpi_h = MetricCard("Height", "-- px", "bbox H", PALETTE["warn"])
         self.kpi_focal = MetricCard("Focal", "-- px", "calibrated", PALETTE["accent"])
         self.kpi_stable = MetricCard("Stability", "--", "size jitter", PALETTE["warn"])
         for card in (

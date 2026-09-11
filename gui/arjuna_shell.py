@@ -8,7 +8,7 @@ os.environ["OPENCV_LOG_LEVEL"] = "OFF"
 os.environ["OPENCV_VIDEOINPUT_MSMF_ENABLE_HW_TRANSFORMS"] = "0"
 
 from PyQt6.QtCore import Qt, pyqtSlot
-from PyQt6.QtGui import QKeyEvent
+from PyQt6.QtGui import QColor, QIcon, QKeyEvent, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
     QDoubleSpinBox,
@@ -40,7 +40,6 @@ from gui.pages.distance_calib_page import DistanceCalibPage
 from gui.pages.joystick_page import JoystickPage
 from gui.pages.live_feed_page import LiveFeedPage
 from gui.pages.logs_page import LogsPage
-from gui.pages.placeholder_page import PlaceholderPage
 from gui.pages.target_database_page import TargetDatabasePage
 from gui.pages.telemetry_page import TelemetryPage
 from gui.pid_panel import PIDTuningPanel
@@ -51,16 +50,61 @@ from estimation.distance_calib import load_distance_calib
 
 
 NAV_ITEMS: list[tuple[str, str]] = [
-    ("dashboard", "01  Dashboard"),
-    ("live_feed", "02  Live Camera Feed"),
-    ("target_database", "03  Target Database"),
-    ("telemetry", "04  Flight Telemetry"),
-    ("joystick", "05  Remote Control"),
-    ("logs", "06  Logs"),
-    ("distance_calib", "07  Distance Calib"),
-    ("calibration", "08  Calibration"),
-    ("settings", "09  Settings"),
+    ("live_feed", "Live Camera Feed"),
+    ("dashboard", "Dashboard"),
+    ("target_database", "Target Database"),
+    ("telemetry", "Flight Telemetry"),
+    ("joystick", "Remote Control"),
+    ("logs", "Logs"),
+    ("distance_calib", "Distance Calib"),
+    ("calibration", "Calibration"),
+    ("settings", "Settings"),
 ]
+
+
+def _nav_icon(kind: str) -> QIcon:
+    pm = QPixmap(14, 14)
+    pm.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pm)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+    painter.setPen(QPen(QColor("#A8B0BA"), 1))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    if kind == "dashboard":
+        painter.drawRect(1, 1, 5, 5)
+        painter.drawRect(8, 1, 5, 5)
+        painter.drawRect(1, 8, 5, 5)
+        painter.drawRect(8, 8, 5, 5)
+    elif kind == "live_feed":
+        painter.drawRect(1, 3, 12, 8)
+        painter.drawLine(4, 6, 4, 8)
+        painter.drawLine(4, 8, 7, 7)
+    elif kind == "target_database":
+        painter.drawRect(2, 2, 10, 10)
+        painter.drawLine(2, 5, 12, 5)
+        painter.drawLine(2, 9, 12, 9)
+    elif kind == "telemetry":
+        painter.drawLine(2, 11, 5, 7)
+        painter.drawLine(5, 7, 8, 9)
+        painter.drawLine(8, 9, 12, 3)
+    elif kind == "joystick":
+        painter.drawEllipse(3, 3, 8, 8)
+        painter.drawPoint(7, 7)
+    elif kind == "logs":
+        painter.drawLine(3, 4, 11, 4)
+        painter.drawLine(3, 7, 11, 7)
+        painter.drawLine(3, 10, 11, 10)
+    elif kind == "distance_calib":
+        painter.drawEllipse(2, 2, 10, 10)
+        painter.drawLine(7, 2, 7, 12)
+    elif kind == "calibration":
+        painter.drawRect(3, 3, 8, 8)
+        painter.drawLine(1, 7, 13, 7)
+        painter.drawLine(7, 1, 7, 13)
+    else:
+        painter.drawRect(3, 3, 8, 8)
+        painter.drawPoint(7, 7)
+    painter.end()
+    return QIcon(pm)
 
 
 class ArjunaShell(QMainWindow):
@@ -96,7 +140,7 @@ class ArjunaShell(QMainWindow):
         # ----- Sidebar -----
         sidebar = QFrame()
         sidebar.setObjectName("sidebar")
-        sidebar.setFixedWidth(210)
+        sidebar.setFixedWidth(218)
         sb = QVBoxLayout(sidebar)
         sb.setContentsMargins(0, 0, 0, 0)
         sb.setSpacing(0)
@@ -107,7 +151,7 @@ class ArjunaShell(QMainWindow):
         brand_l.setContentsMargins(14, 16, 14, 14)
         brand_l.setSpacing(2)
 
-        mark = QLabel("◈  AUTONOMOUS GCS")
+        mark = QLabel("■  AUTONOMOUS GCS")
         mark.setObjectName("brandMark")
         brand_l.addWidget(mark)
 
@@ -125,7 +169,7 @@ class ArjunaShell(QMainWindow):
         self.nav_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.nav_list.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
         for key, label in NAV_ITEMS:
-            item = QListWidgetItem(label)
+            item = QListWidgetItem(_nav_icon(key), label)
             item.setData(Qt.ItemDataRole.UserRole, key)
             self.nav_list.addItem(item)
         self.nav_list.currentRowChanged.connect(self._on_nav_changed)
@@ -147,14 +191,10 @@ class ArjunaShell(QMainWindow):
 
         # Top status strip
         topbar = QFrame()
-        topbar.setObjectName("panel")
-        topbar.setStyleSheet(
-            "QFrame#panel { border: none; border-bottom: 1px solid #2a3038; "
-            "border-radius: 0; background: #13161b; }"
-        )
+        topbar.setObjectName("topStatusBar")
         top_l = QHBoxLayout(topbar)
         top_l.setContentsMargins(16, 8, 16, 8)
-        top_l.setSpacing(10)
+        top_l.setSpacing(8)
 
         self.pill_mode = StatusPill("STANDBY", "neutral")
         self.pill_lock = StatusPill("NO LOCK", "neutral")
@@ -169,7 +209,7 @@ class ArjunaShell(QMainWindow):
 
         self.lbl_active_page = QLabel("DASHBOARD")
         self.lbl_active_page.setStyleSheet(
-            "color: #6b7380; font-size: 8pt; letter-spacing: 2px; font-weight: 650; background: transparent;"
+            "color: #6E7682; font-size: 8pt; letter-spacing: 2.2px; font-weight: 650; background: transparent;"
         )
         top_l.addWidget(self.lbl_active_page)
         content_l.addWidget(topbar)
@@ -203,7 +243,7 @@ class ArjunaShell(QMainWindow):
 
         calib_layout.addWidget(PageHeader("Calibration", "Tune camera geometry and follow-controller response"))
         calib_note = QLabel("Use the calibration wizard to verify stick directions and follow gains before armed flight.")
-        calib_note.setStyleSheet("color: #6b7380; background: transparent;")
+        calib_note.setStyleSheet("color: #6E7682; background: transparent;")
         calib_note.setWordWrap(True)
         calib_layout.addWidget(calib_note)
         btn_calib = QPushButton("Open Calibration Wizard")
@@ -258,8 +298,7 @@ class ArjunaShell(QMainWindow):
         key = item.data(Qt.ItemDataRole.UserRole)
         if key in self._pages:
             self.stack.setCurrentWidget(self._pages[key])
-            label = item.text().split("  ", 1)[-1].upper()
-            self.lbl_active_page.setText(label)
+            self.lbl_active_page.setText(item.text().upper())
             if key == "target_database":
                 self.page_target_db.refresh_list()
 

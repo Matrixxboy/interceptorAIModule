@@ -122,7 +122,7 @@ class MainWindow(QMainWindow):
         self.btn_connect.clicked.connect(self._toggle_serial_connection)
 
         self.lbl_serial_status = QLabel("DISCONNECTED")
-        self.lbl_serial_status.setStyleSheet("color: #ef4444; font-weight: bold; padding: 4px 8px;")
+        self.lbl_serial_status.setStyleSheet("color: #B84A52; font-weight: bold; padding: 4px 8px;")
 
         ser_layout.addWidget(QLabel("Port:"))
         ser_layout.addWidget(self.combo_ports, stretch=1)
@@ -271,7 +271,7 @@ class MainWindow(QMainWindow):
             self.btn_connect.setText("Connect Serial")
             self.btn_connect.setEnabled(True)
             self.lbl_serial_status.setText("DISCONNECTED")
-            self.lbl_serial_status.setStyleSheet("color: #ef4444; font-weight: bold; padding: 4px 8px;")
+            self.lbl_serial_status.setStyleSheet("color: #B84A52; font-weight: bold; padding: 4px 8px;")
             self.statusBar().showMessage("Serial port disconnected.")
         else:
             port = self.combo_ports.currentData()
@@ -283,7 +283,7 @@ class MainWindow(QMainWindow):
             self.btn_connect.setText("Connecting...")
             self.btn_connect.setEnabled(False)
             self.lbl_serial_status.setText("CONNECTING...")
-            self.lbl_serial_status.setStyleSheet("color: #eab308; font-weight: bold; padding: 4px 8px;")
+            self.lbl_serial_status.setStyleSheet("color: #B89A5A; font-weight: bold; padding: 4px 8px;")
 
             self._conn_thread = MainWindowConnectionWorker(self.worker, port, baud)
             self._conn_thread.finished_signal.connect(self._on_connection_finished)
@@ -294,12 +294,12 @@ class MainWindow(QMainWindow):
         if ok:
             self.btn_connect.setText("Disconnect")
             self.lbl_serial_status.setText(f"CONNECTED ({port})")
-            self.lbl_serial_status.setStyleSheet("color: #22c55e; font-weight: bold; padding: 4px 8px;")
+            self.lbl_serial_status.setStyleSheet("color: #5FAF83; font-weight: bold; padding: 4px 8px;")
             self.statusBar().showMessage(msg)
         else:
             self.btn_connect.setText("Connect Serial")
             self.lbl_serial_status.setText("ERROR")
-            self.lbl_serial_status.setStyleSheet("color: #ef4444; font-weight: bold; padding: 4px 8px;")
+            self.lbl_serial_status.setStyleSheet("color: #B84A52; font-weight: bold; padding: 4px 8px;")
             QMessageBox.critical(self, "Serial Connection Error", msg)
 
     @pyqtSlot(int, int, int, int)

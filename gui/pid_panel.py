@@ -85,13 +85,13 @@ class PIDTuningPanel(QWidget):
             )
         ):
             name = QLabel(lab)
-            name.setStyleSheet("color: #6b7380; font-size: 8pt; background: transparent;")
+            name.setStyleSheet("color: #6E7682; font-size: 8pt; background: transparent;")
             name.setToolTip(sp.toolTip())
             ppn_grid.addWidget(name, 1, col)
             ppn_grid.addWidget(sp, 2, col)
 
         tip = QLabel("PPN engages when 3D velocity is trusted · fades near desired distance")
-        tip.setStyleSheet("color: #6b7380; font-size: 7.5pt; background: transparent;")
+        tip.setStyleSheet("color: #6E7682; font-size: 7.5pt; background: transparent;")
         tip.setWordWrap(True)
         ppn_grid.addWidget(tip, 3, 0, 1, 4)
 
@@ -114,7 +114,7 @@ class PIDTuningPanel(QWidget):
         for col, text in enumerate(headers):
             lbl = QLabel(text)
             lbl.setStyleSheet(
-                "color: #9aa3b2; font-weight: 650; font-size: 8pt; background: transparent;"
+                "color: #A8B0BA; font-weight: 650; font-size: 8pt; background: transparent;"
             )
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter if col else Qt.AlignmentFlag.AlignLeft)
             grid.addWidget(lbl, 0, col)
@@ -132,7 +132,7 @@ class PIDTuningPanel(QWidget):
 
         for r, (label, field, hi, step) in enumerate(rows, start=1):
             name = QLabel(label)
-            name.setStyleSheet("color: #6b7380; font-size: 8.5pt; background: transparent;")
+            name.setStyleSheet("color: #6E7682; font-size: 8.5pt; background: transparent;")
             grid.addWidget(name, r, 0)
 
             for col, (store, cfg, max_kp) in enumerate(
@@ -150,7 +150,7 @@ class PIDTuningPanel(QWidget):
                 grid.addWidget(sp, r, col, alignment=Qt.AlignmentFlag.AlignCenter)
 
         tip2 = QLabel("Higher Kp = stronger correction · raise Max if the stick saturates early")
-        tip2.setStyleSheet("color: #6b7380; font-size: 7.5pt; background: transparent;")
+        tip2.setStyleSheet("color: #6E7682; font-size: 7.5pt; background: transparent;")
         tip2.setWordWrap(True)
         grid.addWidget(tip2, len(rows) + 1, 0, 1, 4)
 

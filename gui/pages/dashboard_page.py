@@ -16,7 +16,7 @@ class DashboardPage(QWidget):
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(14)
+        layout.setSpacing(12)
 
         header = PageHeader("Mission Dashboard", "Live operational overview of tracking, link, and flight command state")
         self.pill_ops = StatusPill("OPS IDLE", "neutral")
@@ -24,23 +24,22 @@ class DashboardPage(QWidget):
         layout.addWidget(header)
 
         grid = QGridLayout()
-        grid.setSpacing(12)
+        grid.setSpacing(10)
         grid.setContentsMargins(0, 0, 0, 0)
 
-        a = PALETTE["accent"]
+        a = PALETTE["info"]
         ok = PALETTE["ok"]
-        warn = PALETTE["warn"]
         err = PALETTE["error"]
         mute = PALETTE["text_mute"]
 
-        self.card_fps = MetricCard("FPS", "--", "Pipeline throughput", ok)
-        self.card_conf = MetricCard("Confidence", "--", "Active target lock", a)
-        self.card_dist = MetricCard("Distance", "-- m", "Estimated range", a)
-        self.card_target = MetricCard("Active Target", "NONE", "Target ID", mute)
-        self.card_serial = MetricCard("Serial Link", "OFFLINE", "MSP connection", err)
-        self.card_rc = MetricCard("RC Output", "R1500 P1500 Y1500", "Flight commands", a)
-        self.card_velocity = MetricCard("Object Velocity", "-- px/s", "Image-plane speed", a)
-        self.card_failsafe = MetricCard("Failsafe", "OK", "Safety status", ok)
+        self.card_fps = MetricCard("FPS", "--", "Real-time pipeline", ok, icon="fps")
+        self.card_conf = MetricCard("Confidence", "--", "Active target lock", a, icon="conf")
+        self.card_dist = MetricCard("Distance", "-- m", "Estimated range", a, icon="dist")
+        self.card_target = MetricCard("Active Target", "NONE", "Target ID", mute, icon="target")
+        self.card_serial = MetricCard("Serial Link", "OFFLINE", "MSP connection", err, icon="serial")
+        self.card_rc = MetricCard("RC Output", "R1500 P1500 Y1500", "Flight commands", a, icon="rc")
+        self.card_velocity = MetricCard("Object Velocity", "-- px/s", "Image-plane speed", a, icon="vel")
+        self.card_failsafe = MetricCard("Failsafe", "OK", "Safety status", ok, icon="fail")
 
         cards = [
             self.card_fps,
@@ -63,7 +62,7 @@ class DashboardPage(QWidget):
         panel_status = Panel("System Status")
         self.lbl_status = QLabel("Awaiting pipeline data…")
         self.lbl_status.setStyleSheet(
-            "color: #94a3b8; font-family: Consolas, 'Cascadia Mono', monospace; "
+            f"color: {PALETTE['text_dim']}; font-family: Consolas, 'Cascadia Mono', monospace; "
             "font-size: 9.5pt; background: transparent; padding: 4px 0;"
         )
         self.lbl_status.setWordWrap(True)
@@ -78,7 +77,7 @@ class DashboardPage(QWidget):
             "4. Enable Follow · monitor Telemetry"
         )
         hint.setStyleSheet(
-            "color: #6b7380; font-size: 9pt; background: transparent; line-height: 1.4;"
+            f"color: {PALETTE['text_mute']}; font-size: 9pt; background: transparent; line-height: 1.4;"
         )
         panel_hint.add_widget(hint)
         bottom.addWidget(panel_hint, stretch=1)

@@ -88,12 +88,12 @@ class LogsPage(QWidget):
 
     def _severity_color(self, severity: LogSeverity) -> str:
         return {
-            LogSeverity.DEBUG: "#6b7380",
-            LogSeverity.INFO: "#4f7cac",
-            LogSeverity.WARNING: "#b08a3c",
-            LogSeverity.ERROR: "#b05656",
-            LogSeverity.CRITICAL: "#b05656",
-        }.get(severity, "#9aa3b2")
+            LogSeverity.DEBUG: "#6E7682",
+            LogSeverity.INFO: "#6287C7",
+            LogSeverity.WARNING: "#B89A5A",
+            LogSeverity.ERROR: "#B84A52",
+            LogSeverity.CRITICAL: "#B84A52",
+        }.get(severity, "#A8B0BA")
 
     def refresh_logs(self) -> None:
         cat_val = self.filter_category.currentData()

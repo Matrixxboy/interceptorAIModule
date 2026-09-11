@@ -97,7 +97,7 @@ class TargetDatabasePage(QWidget):
         self.lbl_image = QLabel("No image")
         self.lbl_image.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_image.setMinimumSize(320, 240)
-        self.lbl_image.setStyleSheet("background: #0f172a; border: 1px solid #334155;")
+        self.lbl_image.setStyleSheet("background: #030405; border: 1px solid #242932; border-radius: 8px;")
 
         meta_widget = QWidget()
         meta_layout = QVBoxLayout(meta_widget)
@@ -125,7 +125,7 @@ class TargetDatabasePage(QWidget):
 
         stats = self.store.stats()
         self.lbl_stats = QLabel(f"Total targets: {stats['total']}")
-        self.lbl_stats.setStyleSheet("color: #6b7380;")
+        self.lbl_stats.setStyleSheet("color: #6E7682;")
         layout.addWidget(self.lbl_stats)
 
     def refresh_list(self) -> None:

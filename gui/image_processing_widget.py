@@ -24,7 +24,7 @@ class ImageProcessingWidget(QWidget):
         self.lbl_flow = QLabel("Waiting for camera feed...")
         self.lbl_flow.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_flow.setMinimumSize(320, 240)
-        self.lbl_flow.setStyleSheet("background-color: #020617; border: 1px solid #334155; border-radius: 4px;")
+        self.lbl_flow.setStyleSheet("background-color: #030405; border: 1px solid #242932; border-radius: 8px;")
         l_flow.addWidget(self.lbl_flow)
 
         # 2. NCC Template Match Heatmap
@@ -33,7 +33,7 @@ class ImageProcessingWidget(QWidget):
         self.lbl_tmpl = QLabel("No Target Locked")
         self.lbl_tmpl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_tmpl.setMinimumSize(320, 240)
-        self.lbl_tmpl.setStyleSheet("background-color: #020617; border: 1px solid #334155; border-radius: 4px;")
+        self.lbl_tmpl.setStyleSheet("background-color: #030405; border: 1px solid #242932; border-radius: 8px;")
         l_tmpl.addWidget(self.lbl_tmpl)
 
         # 3. Canny Edge Gradient Filter
@@ -42,7 +42,7 @@ class ImageProcessingWidget(QWidget):
         self.lbl_edge = QLabel("Waiting for camera feed...")
         self.lbl_edge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_edge.setMinimumSize(320, 240)
-        self.lbl_edge.setStyleSheet("background-color: #020617; border: 1px solid #334155; border-radius: 4px;")
+        self.lbl_edge.setStyleSheet("background-color: #030405; border: 1px solid #242932; border-radius: 8px;")
         l_edge.addWidget(self.lbl_edge)
 
         # 4. HSV Color Histogram Signature
@@ -51,7 +51,7 @@ class ImageProcessingWidget(QWidget):
         self.lbl_hist = QLabel("No Target Locked")
         self.lbl_hist.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_hist.setMinimumSize(320, 240)
-        self.lbl_hist.setStyleSheet("background-color: #020617; border: 1px solid #334155; border-radius: 4px;")
+        self.lbl_hist.setStyleSheet("background-color: #030405; border: 1px solid #242932; border-radius: 8px;")
         l_hist.addWidget(self.lbl_hist)
 
         grid_layout.addWidget(grp_flow, 0, 0)

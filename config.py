@@ -210,8 +210,14 @@ class DeviceConfig:
 
 @dataclass
 class AuxChannelsConfig:
-    arm_channel: int = 6   # CH7 / AUX3
-    mode_channel: int = 7  # CH8 / AUX4
+    lock_channel: int = 4    # CH5 / AUX1 — GCS lock / unlock
+    follow_channel: int = 5  # CH6 / AUX2 — GCS follow / unfollow
+    arm_channel: int = 6     # CH7 / AUX3
+    mode_channel: int = 7    # CH8 / AUX4
+    lock_high: int = 1900
+    lock_low: int = 1000
+    follow_high: int = 1900
+    follow_low: int = 1000
     arm_high: int = 1800
     arm_low: int = 1000
     mode_high: int = 1900

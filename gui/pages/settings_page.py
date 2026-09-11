@@ -163,7 +163,7 @@ class DeviceOptionsPanel(QWidget):
             "The aim line in the feed moves with it — match the real mount."
         )
         hint.setWordWrap(True)
-        hint.setStyleSheet("color: #8a94a6; font-size: 10px;")
+        hint.setStyleSheet("color: #6E7682; font-size: 10px;")
         form.addRow(hint)
         return box
 

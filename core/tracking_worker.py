@@ -10,6 +10,8 @@ import numpy as np
 import serial
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
+from pathlib import Path
+
 from config import SystemConfig
 from control.fpv_follow import FPVFollowController
 from control.msp_link import is_capture_card_port
@@ -30,6 +32,223 @@ _CAPTURE_HINT = ("uhd", "capture", "hdmi", "usb3", "video grab", "video input")
 # Goggles HDMI → this USB capture card. Open by name, never by a guessed index.
 _GOGGLES_CAPTURE = "USB3.0 UHD"
 _device_name_cache: list[str] = []
+_FEED_BG_PATH = Path(__file__).resolve().parents[1] / "public" / "basebg.jpg"
+_feed_bg_src: np.ndarray | None = None
+_feed_bg_sized: dict[tuple[int, int], np.ndarray] = {}
+
+_HUD_WHITE = (232, 234, 232)
+_HUD_INFO = (199, 135, 98)
+_HUD_OK = (131, 175, 95)
+_HUD_ERR = (82, 74, 184)
+_HUD_MUTE = (176, 180, 176)
+_HUD_WARN = (90, 154, 184)
+_HUD_LOCK = (70, 255, 90)  # BGR tactical green — lock box / seeker
+_HUD_FONT = cv2.FONT_HERSHEY_SIMPLEX
+
+
+def _load_feed_bg() -> np.ndarray | None:
+    global _feed_bg_src
+    if _feed_bg_src is not None:
+        return _feed_bg_src
+    img = cv2.imread(str(_FEED_BG_PATH))
+    if img is None or img.size == 0:
+        return None
+    _feed_bg_src = img
+    return _feed_bg_src
+
+
+def default_feed_frame(width: int, height: int) -> np.ndarray:
+    """Front-facing landscape placeholder used when HDMI is dark or missing."""
+    w = max(320, int(width))
+    h = max(180, int(height))
+    key = (w, h)
+    cached = _feed_bg_sized.get(key)
+    if cached is not None:
+        return cached.copy()
+    src = _load_feed_bg()
+    if src is None:
+        frame = np.zeros((h, w, 3), dtype=np.uint8)
+    else:
+        frame = cv2.resize(src, (w, h), interpolation=cv2.INTER_AREA)
+    _feed_bg_sized[key] = frame
+    return frame.copy()
+
+
+def _hud_panel(frame: np.ndarray, x: int, y: int, pw: int, ph: int) -> None:
+    """Dark matte HUD plate — no bloom."""
+    fh, fw = frame.shape[:2]
+    x = int(np.clip(x, 0, max(0, fw - 1)))
+    y = int(np.clip(y, 0, max(0, fh - 1)))
+    x2 = int(np.clip(x + pw, 0, fw))
+    y2 = int(np.clip(y + ph, 0, fh))
+    roi = frame[y:y2, x:x2]
+    if roi.size == 0:
+        return
+    overlay = roi.copy()
+    overlay[:] = (28, 22, 18)
+    cv2.addWeighted(overlay, 0.62, roi, 0.38, 0, roi)
+    cv2.rectangle(frame, (x, y), (x2 - 1, y2 - 1), (58, 49, 44), 1)
+
+
+def _hud_text(frame: np.ndarray, text: str, org: tuple[int, int], color: tuple[int, int, int],
+              scale: float = 0.62, thick: int = 2) -> None:
+    x, y = int(org[0]), int(org[1])
+    outline = max(3, thick + 2)
+    cv2.putText(frame, text, (x, y), _HUD_FONT, scale, (12, 10, 8), outline, cv2.LINE_AA)
+    cv2.putText(frame, text, (x, y), _HUD_FONT, scale, color, thick, cv2.LINE_AA)
+
+
+def _draw_corner_brackets(
+    frame: np.ndarray,
+    x: int,
+    y: int,
+    bw: int,
+    bh: int,
+    color: tuple[int, int, int],
+    thickness: int = 2,
+    tick: int | None = None,
+) -> None:
+    """Open targeting brackets — like a seeker lock box, not a filled card."""
+    if bw < 8 or bh < 8:
+        return
+    tick = int(tick if tick is not None else max(18, min(bw, bh) * 0.34))
+    tick = max(12, min(tick, bw // 2, bh // 2))
+    x2, y2 = x + bw, y + bh
+    t = max(2, int(thickness))
+    cv2.line(frame, (x, y), (x + tick, y), color, t)
+    cv2.line(frame, (x, y), (x, y + tick), color, t)
+    cv2.line(frame, (x2, y), (x2 - tick, y), color, t)
+    cv2.line(frame, (x2, y), (x2, y + tick), color, t)
+    cv2.line(frame, (x, y2), (x + tick, y2), color, t)
+    cv2.line(frame, (x, y2), (x, y2 - tick), color, t)
+    cv2.line(frame, (x2, y2), (x2 - tick, y2), color, t)
+    cv2.line(frame, (x2, y2), (x2, y2 - tick), color, t)
+
+
+def _draw_scope_crosshair(
+    frame: np.ndarray,
+    cx: int,
+    cy: int,
+    w: int,
+    h: int,
+    color: tuple[int, int, int],
+    thickness: int = 2,
+) -> None:
+    arm = int(min(w, h) * 0.38)
+    gap = max(14, int(min(w, h) * 0.028))
+    t = max(2, thickness)
+    cv2.line(frame, (cx - arm, cy), (cx - gap, cy), color, t)
+    cv2.line(frame, (cx + gap, cy), (cx + arm, cy), color, t)
+    cv2.line(frame, (cx, cy - arm), (cx, cy - gap), color, t)
+    cv2.line(frame, (cx, cy + gap), (cx, cy + arm), color, t)
+    cv2.circle(frame, (cx, cy), 3, color, -1)
+    tick = max(8, gap // 2)
+    for dx in (-arm // 2, arm // 2):
+        cv2.line(frame, (cx + dx, cy - tick), (cx + dx, cy + tick), color, 1)
+    for dy in (-arm // 2, arm // 2):
+        cv2.line(frame, (cx - tick, cy + dy), (cx + tick, cy + dy), color, 1)
+
+
+def _paste_seeker_view(frame: np.ndarray, crop: np.ndarray, margin: int = 10) -> None:
+    """PIP zoom, aspect-correct, pinned to the bottom-right of the video."""
+    if crop is None or crop.size == 0:
+        return
+    fh, fw = frame.shape[:2]
+    ch, cw = crop.shape[:2]
+    if ch < 4 or cw < 4:
+        return
+
+    max_side = max(140, min(220, int(min(fw, fh) * 0.20)))
+    scale = min(max_side / float(cw), max_side / float(ch))
+    nw = max(8, int(round(cw * scale)))
+    nh = max(8, int(round(ch * scale)))
+    zoomed = cv2.resize(crop, (nw, nh), interpolation=cv2.INTER_LINEAR)
+
+    x = max(2, fw - nw - margin)
+    y = max(2, fh - nh - margin)
+    frame[y:y + nh, x:x + nw] = zoomed
+    cv2.rectangle(frame, (x - 1, y - 1), (x + nw, y + nh), _HUD_LOCK, 2)
+    inset = max(6, min(12, nw // 16, nh // 16))
+    _draw_corner_brackets(
+        frame, x + inset, y + inset, nw - 2 * inset, nh - 2 * inset,
+        _HUD_LOCK, 2, tick=max(10, min(16, nw // 8)),
+    )
+    scx, scy = x + nw // 2, y + nh // 2
+    cv2.line(frame, (scx - 10, scy), (scx + 10, scy), _HUD_LOCK, 1)
+    cv2.line(frame, (scx, scy - 10), (scx, scy + 10), _HUD_LOCK, 1)
+    _hud_text(frame, "SEEKER VIEW", (x + 6, y + 18), _HUD_LOCK, 0.50, 2)
+
+
+def _hud_measure(
+    lines: list[str],
+    scale: float = 0.60,
+    pad: int = 10,
+    line_gap: int = 8,
+) -> tuple[int, int]:
+    lines = [ln for ln in lines if ln]
+    if not lines:
+        return 0, 0
+    sizes = [cv2.getTextSize(t, _HUD_FONT, scale, 1)[0] for t in lines]
+    tw = max(s[0] for s in sizes)
+    th = sum(s[1] for s in sizes) + line_gap * (len(lines) - 1)
+    return tw + pad * 2, th + pad * 2
+
+
+def _hud_block(
+    frame: np.ndarray,
+    lines: list[str],
+    x: int,
+    y: int,
+    colors: list[tuple[int, int, int]] | None = None,
+    scale: float = 0.60,
+    pad: int = 10,
+    line_gap: int = 8,
+) -> tuple[int, int]:
+    lines = [ln for ln in lines if ln]
+    if not lines:
+        return 0, 0
+    sizes = [cv2.getTextSize(t, _HUD_FONT, scale, 1)[0] for t in lines]
+    tw = max(s[0] for s in sizes)
+    th = sum(s[1] for s in sizes) + line_gap * (len(lines) - 1)
+    pw, ph = tw + pad * 2, th + pad * 2
+    fh, fw = frame.shape[:2]
+    x = int(np.clip(x, 8, max(8, fw - pw - 8)))
+    y = int(np.clip(y, 8, max(8, fh - ph - 8)))
+    _hud_panel(frame, x, y, pw, ph)
+    cy = y + pad
+    for i, t in enumerate(lines):
+        baseline = cy + sizes[i][1]
+        col = colors[i] if colors and i < len(colors) else _HUD_WHITE
+        _hud_text(frame, t, (x + pad, baseline), col, scale)
+        cy = baseline + line_gap
+    return pw, ph
+
+
+def _wrap_status(text: str, max_chars: int = 36) -> list[str]:
+    raw = " ".join((text or "").split())
+    if not raw:
+        return ["No camera feed"]
+
+    chunks: list[str] = []
+    for part in raw.split(" — "):
+        part = part.strip()
+        if not part:
+            continue
+        if len(part) <= max_chars:
+            chunks.append(part)
+            continue
+        words = part.replace(",", ", ").split()
+        cur = ""
+        for word in words:
+            trial = f"{cur} {word}".strip()
+            if len(trial) > max_chars and cur:
+                chunks.append(cur)
+                cur = word
+            else:
+                cur = trial
+        if cur:
+            chunks.append(cur)
+    return chunks[:4] or ["No camera feed"]
 
 
 def list_camera_devices(max_test: int = 6) -> list[tuple[str, str]]:
@@ -129,6 +348,7 @@ class TrackingWorkerThread(QThread):
         self.active_cam_idx: int = self.sys_config.camera.camera_index
         self.active_cam_name: str = ""
         self.camera_status: str = f"Opening {_GOGGLES_CAPTURE}…"
+        self.camera_live: bool = False
 
         self.hybrid = HybridYoloLockTracker(
             det_cfg=self.sys_config.detection,
@@ -496,18 +716,13 @@ class TrackingWorkerThread(QThread):
                 # scans USB and drops telemetry + the capture card together.
                 if self.active_cam_name:
                     self.camera_status = f"{self.active_cam_name} — waiting for goggles HDMI"
-                frame = np.zeros((360, 640, 3), dtype=np.uint8)
-                cv2.putText(
-                    frame,
-                    self.camera_status or "USB capture — waiting for goggles HDMI",
-                    (24, 180),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.55,
-                    (0, 180, 255),
-                    1,
-                    cv2.LINE_AA,
-                )
+                self.camera_live = False
+                fw = int(getattr(self.sys_config.camera, "frame_width", 1280) or 1280)
+                fh = int(getattr(self.sys_config.camera, "frame_height", 720) or 720)
+                frame = default_feed_frame(fw, fh)
                 time.sleep(0.2)
+            else:
+                self.camera_live = True
 
             self.frame_count += 1
             now = time.time()
@@ -656,14 +871,36 @@ class TrackingWorkerThread(QThread):
                         )
                         channel_overrides[rc] = int(pwm)
 
-                    # Lock / Follow are GCS-only. Sending them on CH5/CH6 makes
-                    # INAV treat lock as a flight mode after the target is locked.
+                    aux_map = self.sys_config.aux_channels
+                    lock_ch = int(getattr(aux_map, "lock_channel", 4))
+                    follow_ch = int(getattr(aux_map, "follow_channel", 5))
+                    lock_high = int(getattr(aux_map, "lock_high", 1900))
+                    lock_low = int(getattr(aux_map, "lock_low", 1000))
+                    follow_high = int(getattr(aux_map, "follow_high", 1900))
+                    follow_low = int(getattr(aux_map, "follow_low", 1000))
+
+                    lock_pwm = channel_overrides.get(lock_ch)
+                    follow_pwm = channel_overrides.get(follow_ch)
+                    follow_is_button = False
+                    for i, aux_cfg in enumerate(self.sys_config.joystick.aux_channels):
+                        n = (aux_cfg.name or "").lower()
+                        rc = int(aux_cfg.rc_channel)
+                        if rc == follow_ch or "follow" in n:
+                            follow_is_button = bool(aux_cfg.is_button)
+                            if follow_pwm is None:
+                                follow_pwm = js.aux_pwm.get(f"#{i}", js.aux_pwm.get(aux_cfg.name))
+                        if lock_pwm is None and (rc == lock_ch or "lock" in n):
+                            lock_pwm = js.aux_pwm.get(f"#{i}", js.aux_pwm.get(aux_cfg.name))
+
+                    # Lock / Follow are GCS-only. Do not send them as INAV flight modes.
                     for i, aux_cfg in enumerate(self.sys_config.joystick.aux_channels):
                         n = (aux_cfg.name or "").lower()
                         if "lock" in n or "follow" in n:
                             rc = int(aux_cfg.rc_channel)
                             if rc >= 0:
                                 channel_overrides.pop(rc, None)
+                    channel_overrides.pop(lock_ch, None)
+                    channel_overrides.pop(follow_ch, None)
 
                     # Resolve Arm switch PWM from FC arm channel or named "Arm" AUX
                     arm_ch = int(self.sys_config.aux_channels.arm_channel)
@@ -716,43 +953,31 @@ class TrackingWorkerThread(QThread):
                             if hasattr(self.fc, "set_flight_mode"):
                                 self.fc.set_flight_mode("ACRO")
 
-                    # Lock switch
-                    lock_pwm = js.aux_pwm.get("Lock")
+                    # Lock switch (Settings → AUX lock channel / PWM)
                     if lock_pwm is None:
-                        for i, aux_cfg in enumerate(self.sys_config.joystick.aux_channels):
-                            if "lock" in (aux_cfg.name or "").lower():
-                                lock_pwm = js.aux_pwm.get(f"#{i}")
-                                break
+                        lock_pwm = js.aux_pwm.get("Lock")
                     joy_wants_lock = self._joy_lock_state
                     if lock_pwm is not None:
                         pwm_val = int(lock_pwm)
-                        if pwm_val > 1600:
+                        if pwm_val >= lock_high - 50:
                             joy_wants_lock = True
-                        elif pwm_val < 1400:
+                        elif pwm_val <= lock_low + 50:
                             joy_wants_lock = False
-                        
+
                     if joy_wants_lock and not self._joy_lock_state:
                         self.trigger_auto_lock()
                     elif not joy_wants_lock and self._joy_lock_state:
                         self.reset_lock()
                     self._joy_lock_state = joy_wants_lock
 
-                    # Follow AUX:
+                    # Follow AUX (Settings → AUX follow channel / PWM):
                     #   button  — press toggles Follow / Unfollow
                     #   switch  — high follows, low unfollows
-                    # Either change updates the GUI Follow button.
-                    follow_pwm = None
-                    follow_is_button = True
-                    for i, aux_cfg in enumerate(self.sys_config.joystick.aux_channels):
-                        if "follow" in (aux_cfg.name or "").lower():
-                            follow_pwm = js.aux_pwm.get(f"#{i}", js.aux_pwm.get(aux_cfg.name))
-                            follow_is_button = bool(aux_cfg.is_button)
-                            break
                     if follow_pwm is None:
                         follow_pwm = js.aux_pwm.get("Follow")
                     if follow_pwm is not None:
-                        high = int(follow_pwm) > 1600
-                        low = int(follow_pwm) < 1400
+                        high = int(follow_pwm) >= follow_high - 50
+                        low = int(follow_pwm) <= follow_low + 50
                         if high or low:
                             if not self._joy_follow_seen:
                                 self._joy_follow_level = high
@@ -934,13 +1159,12 @@ class TrackingWorkerThread(QThread):
         h: int,
     ) -> None:
         cx, cy = w // 2, h // 2
-
-        # ── Crosshair ──
-        cv2.drawMarker(frame, (cx, cy), (255, 255, 255), cv2.MARKER_CROSS, 30, 2)
+        lock_color = _HUD_LOCK if locked else _HUD_WHITE
+        _draw_scope_crosshair(frame, cx, cy, w, h, lock_color, 2)
 
         dz_px_x = int(w * 0.5 * self.sys_config.offsets.deadzone_norm)
         dz_px_y = int(h * 0.5 * self.sys_config.offsets.deadzone_norm)
-        cv2.rectangle(frame, (cx - dz_px_x, cy - dz_px_y), (cx + dz_px_x, cy + dz_px_y), (255, 255, 0), 1)
+        cv2.rectangle(frame, (cx - dz_px_x, cy - dz_px_y), (cx + dz_px_x, cy + dz_px_y), _HUD_WARN, 1)
 
         # ── Aim reference line ──
         cam = self.sys_config.camera
@@ -962,14 +1186,13 @@ class TrackingWorkerThread(QThread):
                 dy_tilt = int(math.tan(math.radians(max(-80.0, min(80.0, tilt_deg)))) * half_span)
                 p1 = (cx - half_span, int(np.clip(row - dy_tilt, -5, h + 5)))
                 p2 = (cx + half_span, int(np.clip(row + dy_tilt, -5, h + 5)))
-                cv2.line(frame, p1, p2, (0, 200, 255), 1, cv2.LINE_AA)
-                cv2.putText(
-                    frame,
+                cv2.line(frame, p1, p2, _HUD_INFO, 1, cv2.LINE_AA)
+                aim_label = (
                     f"AIM {cam.desired_elevation_deg:+.0f}deg  TILT {cam.mount_pitch_deg:+.0f}deg"
-                    + ("  LVL" if cam.stabilize_with_attitude else ""),
-                    (cx - half_span, max(14, min(h - 6, int(row) - 8))),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 200, 255), 1, cv2.LINE_AA,
+                    + ("  LVL" if cam.stabilize_with_attitude else "")
                 )
+                aim_y = int(np.clip(int(row) - 12, 58, h - 96))
+                _hud_text(frame, aim_label, (cx - half_span, aim_y), _HUD_INFO, 0.62, 2)
 
         # ── Interceptor telemetry (always visible) ──
         ctrl = self.controller
@@ -993,14 +1216,14 @@ class TrackingWorkerThread(QThread):
             gauge_h = gauge_bot - gauge_top
             gauge_w = 18
 
-            cv2.rectangle(frame, (gauge_x, gauge_top), (gauge_x + gauge_w, gauge_bot), (40, 40, 40), -1)
-            cv2.rectangle(frame, (gauge_x, gauge_top), (gauge_x + gauge_w, gauge_bot), (120, 120, 120), 1)
+            cv2.rectangle(frame, (gauge_x, gauge_top), (gauge_x + gauge_w, gauge_bot), (24, 19, 16), -1)
+            cv2.rectangle(frame, (gauge_x, gauge_top), (gauge_x + gauge_w, gauge_bot), (58, 49, 44), 1)
 
             max_closing = 20.0
             fill_frac = max(0.0, min(1.0, closing_rate / max_closing))
             fill_h = int(gauge_h * fill_frac)
             if fill_h > 0:
-                bar_color = (0, 220, 80) if closing_rate > 0 else (0, 0, 220)
+                bar_color = (131, 175, 95) if closing_rate > 0 else (82, 74, 184)
                 cv2.rectangle(
                     frame,
                     (gauge_x + 1, gauge_bot - fill_h),
@@ -1012,22 +1235,25 @@ class TrackingWorkerThread(QThread):
                 tick_y = gauge_bot - int(gauge_h * tick_val / max_closing)
                 cv2.line(frame, (gauge_x - 4, tick_y), (gauge_x, tick_y), (180, 180, 180), 1)
 
-            info_x = w - 220
-            info_y = 28
-            line_h = 22
-            cv2.putText(frame, "INTERCEPTOR", (info_x, info_y),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 200, 255), 2, cv2.LINE_AA)
-            info_y += line_h + 4
-            cv2.putText(frame, f"TTI: {tti_text}", (info_x, info_y),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.50,
-                        (0, 255, 255) if tti_text == "---" else (0, 0, 255), 1, cv2.LINE_AA)
-            info_y += line_h
-            cv2.putText(frame, f"TGT SPD: {tgt_speed:.1f} m/s", (info_x, info_y),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 165, 255), 1, cv2.LINE_AA)
-            info_y += line_h
-            cv2.putText(frame, f"CLR: {closing_rate:+.1f} m/s", (info_x, info_y),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45,
-                        (0, 220, 80) if closing_rate > 0 else (0, 0, 220), 1, cv2.LINE_AA)
+            _hud_block(
+                frame,
+                [
+                    "INTERCEPTOR",
+                    f"TTI    {tti_text}",
+                    f"TGT    {tgt_speed:.1f} m/s",
+                    f"CLR    {closing_rate:+.1f} m/s",
+                ],
+                w - 250,
+                10,
+                [
+                    _HUD_INFO,
+                    _HUD_MUTE if tti_text == "---" else _HUD_ERR,
+                    _HUD_INFO,
+                    _HUD_OK if closing_rate > 0 else _HUD_ERR,
+                ],
+            )
+
+        seeker_crop: np.ndarray | None = None
 
         # ═══════════════════════════════════════════════════════
         # TARGET LOCK BOX + INTERCEPTION VISUALS
@@ -1038,29 +1264,35 @@ class TrackingWorkerThread(QThread):
             axis = getattr(self.sys_config.distance, "size_axis", "max") or "max"
             size_px = bbox_size_px((float(bx), float(by), float(bw), float(bh)), axis)
 
-            # Tight lock box + corner ticks
-            cv2.rectangle(frame, (bx, by), (bx + bw, by + bh), (0, 255, 200), 2)
-            tick = max(6, min(18, min(bw, bh) // 6))
-            for cx0, cy0, dx, dy in (
-                (bx, by, 1, 1), (bx + bw, by, -1, 1),
-                (bx, by + bh, 1, -1), (bx + bw, by + bh, -1, -1),
-            ):
-                cv2.line(frame, (cx0, cy0), (cx0 + dx * tick, cy0), (0, 255, 120), 2)
-                cv2.line(frame, (cx0, cy0), (cx0, cy0 + dy * tick), (0, 255, 120), 2)
+            # Capture seeker crop before drawing lock graphics on the main frame.
+            pad = max(12, int(max(bw, bh) * 0.45))
+            x0 = max(0, bx - pad)
+            y0 = max(0, by - pad)
+            x1 = min(w, bx + bw + pad)
+            y1 = min(h, by + bh + pad)
+            seeker_crop = frame[y0:y1, x0:x1].copy() if y1 > y0 and x1 > x0 else None
+
+            # Outer + inner targeting brackets (visible lock box)
+            outer = max(10, int(min(bw, bh) * 0.14))
+            _draw_corner_brackets(
+                frame, bx - outer, by - outer, bw + 2 * outer, bh + 2 * outer,
+                _HUD_LOCK, thickness=3, tick=max(22, int(min(bw, bh) * 0.38)),
+            )
+            _draw_corner_brackets(frame, bx, by, bw, bh, _HUD_LOCK, thickness=2)
+            cv2.rectangle(frame, (bx, by), (bx + bw, by + bh), _HUD_LOCK, 1)
+            cv2.circle(frame, (obj_cx, obj_cy), 4, _HUD_LOCK, -1)
+            cv2.circle(frame, (obj_cx, obj_cy), 10, _HUD_LOCK, 1)
 
             # Measured axis highlight
             if axis == "height":
-                cv2.line(frame, (obj_cx, by), (obj_cx, by + bh), (0, 220, 255), 2)
+                cv2.line(frame, (obj_cx, by), (obj_cx, by + bh), _HUD_LOCK, 2)
             elif axis == "diag":
-                cv2.line(frame, (bx, by), (bx + bw, by + bh), (0, 220, 255), 2)
+                cv2.line(frame, (bx, by), (bx + bw, by + bh), _HUD_LOCK, 2)
             else:
                 if axis == "width" or bw >= bh:
-                    cv2.line(frame, (bx, obj_cy), (bx + bw, obj_cy), (0, 220, 255), 2)
+                    cv2.line(frame, (bx, obj_cy), (bx + bw, obj_cy), _HUD_LOCK, 2)
                 else:
-                    cv2.line(frame, (obj_cx, by), (obj_cx, by + bh), (0, 220, 255), 2)
-
-            # Target centre dot
-            cv2.circle(frame, (obj_cx, obj_cy), 4, (0, 255, 255), -1)
+                    cv2.line(frame, (obj_cx, by), (obj_cx, by + bh), _HUD_LOCK, 2)
 
             # Interception point + steering lines only while Follow is on
             has_intercept = (
@@ -1079,65 +1311,78 @@ class TrackingWorkerThread(QThread):
                     [int_x, int_y + diamond_sz],
                     [int_x - diamond_sz, int_y],
                 ], dtype=np.int32)
-                cv2.polylines(frame, [pts], True, (0, 0, 255), 2, cv2.LINE_AA)
-                cv2.circle(frame, (int_x, int_y), 3, (0, 0, 255), -1)
+                cv2.polylines(frame, [pts], True, (82, 74, 184), 1, cv2.LINE_AA)
+                cv2.circle(frame, (int_x, int_y), 2, (82, 74, 184), -1)
 
                 # Steering line (crosshair → intercept)
-                cv2.line(frame, (cx, cy), (int_x, int_y), (0, 0, 255), 2, cv2.LINE_AA)
+                cv2.line(frame, (cx, cy), (int_x, int_y), (82, 74, 184), 1, cv2.LINE_AA)
                 # Predicted path (target → intercept)
-                cv2.line(frame, (obj_cx, obj_cy), (int_x, int_y), (0, 165, 255), 1, cv2.LINE_AA)
+                cv2.line(frame, (obj_cx, obj_cy), (int_x, int_y), (199, 135, 98), 1, cv2.LINE_AA)
 
                 # TTI label near intercept point
                 if hasattr(ctrl, "last_t_intercept") and ctrl.last_t_intercept is not None:
-                    cv2.putText(frame, f"{ctrl.last_t_intercept:.1f}s",
-                                (int_x + 12, int_y - 4),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.40, (0, 0, 255), 1, cv2.LINE_AA)
+                    _hud_text(frame, f"{ctrl.last_t_intercept:.1f}s",
+                              (int_x + 14, int_y - 6), _HUD_ERR, 0.62, 2)
             else:
-                cv2.line(frame, (cx, cy), (obj_cx, obj_cy), (255, 0, 255), 1)
+                cv2.line(frame, (cx, cy), (obj_cx, obj_cy), _HUD_LOCK, 2)
 
-            # ── Text telemetry under the box ──
             tid = self.active_target.target_id if self.active_target else "---"
-            label_y = max(16, by - 8)
-            cv2.putText(frame,
-                        f"LOCK [{tid}] {source.upper()} {conf * 100:.0f}%",
-                        (bx, label_y), cv2.FONT_HERSHEY_SIMPLEX, 0.48,
-                        (0, 255, 255), 1, cv2.LINE_AA)
-
-            cv2.putText(frame,
-                        f"W:{bw}px  H:{bh}px  SIZE:{size_px:.0f}px ({axis})",
-                        (bx, min(h - 8, by + bh + 18)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.48, (80, 255, 160), 1, cv2.LINE_AA)
-
-            cv2.putText(frame,
-                        f"DIST {dist_m:.2f} m",
-                        (bx, min(h - 8, by + bh + 38)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (100, 255, 100), 2, cv2.LINE_AA)
+            lock_y = max(64, min(by - 16, h - 140))
+            size_y = min(h - 110, by + bh + 26)
+            dist_y = min(h - 86, by + bh + 52)
+            _hud_text(frame, f"LOCK  [{tid}]  {source.upper()}  {conf * 100:.0f}%",
+                      (bx, lock_y), _HUD_LOCK, 0.72, 2)
+            _hud_text(frame, f"W {bw}px   H {bh}px   SIZE {size_px:.0f}px ({axis})",
+                      (bx, size_y), _HUD_WHITE, 0.58, 2)
+            _hud_text(frame, f"DIST  {dist_m:.2f} m", (bx, dist_y), _HUD_LOCK, 0.70, 2)
 
             brg = self.controller.last_bearing
             if brg is not None and mount_active:
-                cv2.putText(frame,
-                            f"AZ {math.degrees(brg.az_rad):+.1f}  EL {math.degrees(brg.el_rad):+.1f}  "
-                            f"LOS {brg.slant_m:.2f}m  dALT {brg.vertical_m:+.2f}m",
-                            (bx, min(h - 8, by + bh + 56)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 200, 255), 1, cv2.LINE_AA)
+                _hud_text(
+                    frame,
+                    f"AZ {math.degrees(brg.az_rad):+.1f}  EL {math.degrees(brg.el_rad):+.1f}  "
+                    f"LOS {brg.slant_m:.2f}m  dALT {brg.vertical_m:+.2f}m",
+                    (bx, min(h - 64, by + bh + 78)),
+                    _HUD_INFO,
+                    0.56,
+                    2,
+                )
 
         # ═══════════════════════════════════════════════════════
-        # BOTTOM STATUS BAR
+        # STATUS / CAMERA / INSTRUMENT STRIP
         # ═══════════════════════════════════════════════════════
-        header_color = (0, 255, 0) if safety.is_safe else (0, 0, 255)
-        cv2.putText(frame, f"STATUS: {safety.reason}",
-                    (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.6, header_color, 2)
+        reason = str(getattr(safety, "reason", "—") or "—")
+        status_lines = [f"STATUS  {reason}"] if len(reason) <= 44 else ["STATUS", reason]
+        header_color = _HUD_OK if getattr(safety, "is_safe", False) else _HUD_ERR
+        _hud_block(frame, status_lines, 12, 10, [header_color] * len(status_lines), scale=0.62)
 
-        cv2.putText(frame,
-                    f"CAM:{self.active_cam_name or self.active_cam_idx}  FPS:{self.current_fps:.0f}  "
-                    f"{'FOLLOW' if self.assist_enabled else 'LOCKED ONLY'}  "
-                    f"SERIAL:{'OK' if self.is_connected else 'OFF'}",
-                    (20, h - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
+        if not getattr(self, "camera_live", True):
+            cam_lines = _wrap_status(self.camera_status or "No camera feed")
+            pw, ph = _hud_measure(cam_lines, scale=0.64)
+            _hud_block(
+                frame,
+                cam_lines,
+                (w - pw) // 2,
+                (h - ph) // 2 - 8,
+                [_HUD_WARN] * len(cam_lines),
+                scale=0.64,
+            )
 
-        follow_color = (80, 220, 120) if self.follow_status.startswith("FOLLOWING") else (0, 180, 255)
-        cv2.putText(frame,
-                    f"CTRL: {self.follow_status}  ASSIST:{'ON' if self.assist_enabled else 'OFF'}",
-                    (20, h - 52), cv2.FONT_HERSHEY_SIMPLEX, 0.50, follow_color, 2, cv2.LINE_AA)
+        cam_name = self.active_cam_name or str(self.active_cam_idx)
+        mode = "FOLLOW" if self.assist_enabled else "LOCKED ONLY"
+        serial = "OK" if self.is_connected else "OFF"
+        ctrl_txt = str(getattr(self, "follow_status", "IDLE") or "IDLE")
+        assist = "ON" if self.assist_enabled else "OFF"
+        follow_color = _HUD_OK if ctrl_txt.startswith("FOLLOWING") else _HUD_INFO
+        bottom = [
+            f"CTRL  {ctrl_txt}    ASSIST {assist}",
+            f"CAM  {cam_name}    FPS {self.current_fps:.0f}    {mode}    SERIAL {serial}",
+        ]
+        _, bph = _hud_measure(bottom, scale=0.60)
+        _hud_block(frame, bottom, 12, h - bph - 12, [follow_color, _HUD_WHITE], scale=0.60)
+
+        if seeker_crop is not None:
+            _paste_seeker_view(frame, seeker_crop, margin=10)
 
     def stop(self) -> None:
         self.running = False

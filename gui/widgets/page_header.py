@@ -52,24 +52,24 @@ class PageHeader(QWidget):
 
 
 class StatusPill(QLabel):
-    """Compact status chip."""
+    """Physical-style system state indicator (no glow)."""
 
     def __init__(self, text: str = "IDLE", tone: str = "neutral", parent=None) -> None:
         super().__init__(text, parent)
         self.setObjectName("statusPill")
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setMinimumWidth(64)
-        self.setMinimumHeight(24)
+        self.setMinimumWidth(72)
+        self.setMinimumHeight(26)
         self.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         self.set_tone(tone)
 
     def set_tone(self, tone: str) -> None:
         colors = {
-            "ok": ("#14241c", PALETTE["ok"], "#b8e0cc"),
-            "warn": ("#242014", PALETTE["warn"], "#e8d4a0"),
-            "error": ("#241616", PALETTE["error"], "#f0c0c0"),
-            "info": ("#141c24", PALETTE["info"], "#c0d8f0"),
-            "neutral": ("#171a1f", PALETTE["border"], PALETTE["text_dim"]),
+            "ok": ("#101814", PALETTE["ok"], "#C8E0D2"),
+            "warn": ("#1A1610", PALETTE["warn"], "#E4D6B4"),
+            "error": ("#1A1214", PALETTE["error"], "#E8C4C8"),
+            "info": ("#10141C", PALETTE["info"], "#C8D4E8"),
+            "neutral": (PALETTE["bg_panel"], PALETTE["border"], PALETTE["text_dim"]),
         }
         bg, border, fg = colors.get(tone, colors["neutral"])
         self.setStyleSheet(
@@ -79,10 +79,10 @@ class StatusPill(QLabel):
                 color: {fg};
                 border: 1px solid {border};
                 border-radius: 4px;
-                padding: 3px 8px;
+                padding: 3px 10px;
                 font-size: 7.5pt;
                 font-weight: 650;
-                letter-spacing: 0.6px;
+                letter-spacing: 1px;
             }}
             """
         )

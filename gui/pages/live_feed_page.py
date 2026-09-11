@@ -239,7 +239,7 @@ class LiveFeedPage(QWidget):
         thr.addWidget(btn_thr_min)
 
         thr_hint = QLabel("U/J  A/X")
-        thr_hint.setStyleSheet("color: #6b7380; font-size: 7.5pt; background: transparent;")
+        thr_hint.setStyleSheet("color: #6E7682; font-size: 7.5pt; background: transparent;")
         thr_hint.setToolTip("U +25 · J −25 · A arm · X disarm")
         thr.addWidget(thr_hint)
         thr.addStretch(1)
@@ -323,7 +323,7 @@ class LiveFeedPage(QWidget):
     def _metric_label(text: str) -> QLabel:
         lbl = QLabel(text)
         lbl.setStyleSheet(
-            "color: #9aa3b2; font-family: Consolas, 'Cascadia Mono', monospace; "
+            "color: #A8B0BA; font-family: Consolas, 'Cascadia Mono', monospace; "
             "font-size: 8pt; background: transparent;"
         )
         return lbl
@@ -496,13 +496,13 @@ class LiveFeedPage(QWidget):
         if rec.locked:
             self.lbl_lock.setText(f"LOCK  ACTIVE · {rec.source.upper()}")
             self.lbl_lock.setStyleSheet(
-                "color: #3d8f6a; font-family: Consolas, monospace; font-size: 8pt; background: transparent;"
+                "color: #5FAF83; font-family: Consolas, monospace; font-size: 8pt; background: transparent;"
             )
             self.pill_feed.set_status("TRACKING", "ok")
         else:
             self.lbl_lock.setText("LOCK  NONE")
             self.lbl_lock.setStyleSheet(
-                "color: #9aa3b2; font-family: Consolas, monospace; font-size: 8pt; background: transparent;"
+                "color: #A8B0BA; font-family: Consolas, monospace; font-size: 8pt; background: transparent;"
             )
             self.pill_feed.set_status("LIVE", "info")
 

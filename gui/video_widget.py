@@ -5,7 +5,7 @@ from __future__ import annotations
 import cv2
 import numpy as np
 from PyQt6.QtCore import QPoint, QRect, Qt, pyqtSignal
-from PyQt6.QtGui import QImage, QMouseEvent, QPainter, QPen, QPixmap
+from PyQt6.QtGui import QColor, QImage, QMouseEvent, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import QLabel, QSizePolicy, QWidget
 
 
@@ -21,7 +21,7 @@ class VideoDisplayWidget(QLabel):
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setStyleSheet(
             "QLabel#videoSurface {"
-            "background-color: #02060c; border: 1px solid #152033; border-radius: 2px;"
+            "background-color: #030405; border: 1px solid #242932; border-radius: 8px;"
             "}"
         )
 
@@ -140,9 +140,30 @@ class VideoDisplayWidget(QLabel):
 
     def paintEvent(self, event) -> None:
         super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        r = self.rect().adjusted(4, 4, -5, -5)
+        frame = QColor("#2C313A")
+        painter.setPen(QPen(frame, 1))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(r)
+
+        tick = 14
+        accent = QColor("#9D3FF5")
+        painter.setPen(QPen(accent, 1))
+        # Corner brackets — ISR-style frame, not a glow
+        x0, y0, x1, y1 = r.left(), r.top(), r.right(), r.bottom()
+        painter.drawLine(x0, y0, x0 + tick, y0)
+        painter.drawLine(x0, y0, x0, y0 + tick)
+        painter.drawLine(x1, y0, x1 - tick, y0)
+        painter.drawLine(x1, y0, x1, y0 + tick)
+        painter.drawLine(x0, y1, x0 + tick, y1)
+        painter.drawLine(x0, y1, x0, y1 - tick)
+        painter.drawLine(x1, y1, x1 - tick, y1)
+        painter.drawLine(x1, y1, x1, y1 - tick)
+
         if self.dragging:
-            painter = QPainter(self)
-            pen = QPen(Qt.GlobalColor.magenta, 2, Qt.PenStyle.DashLine)
+            pen = QPen(QColor("#9D3FF5"), 1, Qt.PenStyle.DashLine)
             painter.setPen(pen)
             rect = self._normalize_rect(self.start_point, self.end_point)
             painter.drawRect(rect)
