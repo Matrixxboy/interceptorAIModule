@@ -341,6 +341,14 @@ class TrackingWorkerThread(QThread):
     def trigger_auto_lock(self) -> None:
         self.pending_auto_lock = True
 
+    def set_target_type(self, kind: str) -> None:
+        kind = (kind or "auto").lower()
+        if kind not in ("auto", "aerial", "ground"):
+            kind = "auto"
+        self.sys_config.detection.target_type = kind  # type: ignore[assignment]
+        if hasattr(self, "hybrid") and hasattr(self.hybrid, "apply_detection_config"):
+            self.hybrid.apply_detection_config(self.sys_config.detection)
+
     def reset_lock(self) -> None:
         if self.active_target:
             self.target_store.finish_target(self.active_target)
@@ -372,9 +380,11 @@ class TrackingWorkerThread(QThread):
         profile.add_event("Tracking Started", system_response="Hybrid tracker active")
         self.active_target = profile
         self.target_changed.emit(profile)
+        width_m = float(getattr(self.hybrid, "known_width_m", 0.30) or 0.30)
+        self.controller.distance_estimator.set_target_width_m(width_m)
         self.sys_log.log(
             LogCategory.TRACKING,
-            f"Target locked: {profile.target_id} via {source}",
+            f"Target locked: {profile.target_id} via {source} family={getattr(self.hybrid, 'family', '')} width={width_m:.2f}m",
             target_id=profile.target_id,
         )
 

@@ -25,6 +25,43 @@ AERIAL_THREAT_CLASSES: tuple[str, ...] = (
 
 DetectionMode = Literal["world", "coco", "custom"]
 TrackerBackend = Literal["bytetrack", "botsort", "iou", "csrt", "kcf"]
+TargetTypeFilter = Literal["auto", "aerial", "ground"]
+
+# COCO ids: car, motorcycle, bus, truck
+COCO_VEHICLE_CLASS_IDS: tuple[int, ...] = (2, 3, 5, 7)
+COCO_AERIAL_PROXY_IDS: tuple[int, ...] = (4, 14, 33)  # airplane, bird, kite
+
+KNOWN_WIDTH_M_BY_LABEL: dict[str, float] = {
+    "drone": 0.30,
+    "quadcopter": 0.30,
+    "uav": 0.30,
+    "fpv drone": 0.30,
+    "missile": 0.25,
+    "rocket": 0.25,
+    "projectile": 0.20,
+    "aircraft": 2.0,
+    "airplane": 12.0,
+    "helicopter": 3.0,
+    "car": 1.80,
+    "truck": 2.50,
+    "bus": 2.50,
+    "motorcycle": 0.80,
+    "motorbike": 0.80,
+}
+KNOWN_WIDTH_M_BY_FAMILY: dict[str, float] = {
+    "aerial": 0.30,
+    "ground": 1.80,
+}
+
+
+def known_width_m(label: str = "", family: str = "", fallback: float = 0.30) -> float:
+    key = (label or "").strip().lower()
+    if key in KNOWN_WIDTH_M_BY_LABEL:
+        return float(KNOWN_WIDTH_M_BY_LABEL[key])
+    fam = (family or "").strip().lower()
+    if fam in KNOWN_WIDTH_M_BY_FAMILY:
+        return float(KNOWN_WIDTH_M_BY_FAMILY[fam])
+    return float(fallback)
 
 
 @dataclass
@@ -77,7 +114,7 @@ class SafetyConfig:
     max_backward_speed: float = 250.0  # max pitch µs offset backward
     max_acceleration: float = 1800.0  # µs/s^2 acceleration limit
     # PPN guidance (additive to visual PID) — live-tunable
-    ppn_enabled: bool = True
+    ppn_enabled: bool = False  # Chase FPV: visual PID + distance; enable for aerial intercept
     ppn_n: float = 3.0  # Navigation constant N_p (typically 3–5)
     ppn_gain: float = 30.0  # µs per (m/s²) stick bias
     ppn_yaw_lead_gain: float = 80.0  # µs per (rad/s) LOS-rate yaw lead
@@ -103,7 +140,7 @@ class CameraConfig:
     camera_index: int = 1
     target_fps: float = 60.0  # Cap vision loop (uncapped races to 200–300+ FPS on fast GPUs)
     # --- Mount geometry: lets the camera sit at ANY angle, not just straight ahead ---
-    mount_pitch_deg: float = 0.0  # + = tilted UP (typical FPV cruise tilt 15–30°)
+    mount_pitch_deg: float = 20.0  # + = tilted UP (typical FPV nose-camera cruise tilt 15–30°)
     mount_roll_deg: float = 0.0  # + = rotated clockwise in the image
     mount_yaw_deg: float = 0.0  # + = aimed right of the nose
     stabilize_with_attitude: bool = False  # Subtract live FC roll/pitch → gravity-levelled aim
@@ -121,14 +158,20 @@ class DetectionConfig:
     custom_weights: Path = field(
         default_factory=lambda: MODELS_DIR / "drone_missile_best.pt"
     )
-    imgsz: int = 640
+    imgsz: int = 768
     conf_threshold: float = 0.25
+    aerial_conf: float = 0.30
+    vehicle_conf: float = 0.22
     iou_threshold: float = 0.45
     max_det: int = 20
     world_classes: Sequence[str] = AERIAL_THREAT_CLASSES
-    class_filter: Sequence[int] = (0, 4, 14, 32, 33)
+    class_filter: Sequence[int] = COCO_AERIAL_PROXY_IDS
+    vehicle_class_filter: Sequence[int] = COCO_VEHICLE_CLASS_IDS
     min_box_area_frac: float = 0.00005
     max_box_area_frac: float = 0.35
+    ground_max_box_area_frac: float = 0.85
+    ground_min_cy_frac: float = 0.30  # Front cam: ignore vehicle boxes in the upper sky
+    target_type: TargetTypeFilter = "auto"
     device: str = "auto"  # "auto" | "cuda" | "cpu"
     half: bool = True
     detect_every_n: int = 6  # YOLO cadence while locked (hybrid reads this)
@@ -136,12 +179,10 @@ class DetectionConfig:
     augment: bool = False
 
     def resolved_mode(self) -> DetectionMode:
-        """Prefer custom weights when present and mode is coco (auto-upgrade)."""
+        """Resolve a single-model mode. DualDetector runs custom + COCO separately."""
         custom = Path(self.custom_weights)
         if self.mode == "custom":
             return "custom" if custom.is_file() else "coco"
-        if self.mode == "coco" and custom.is_file():
-            return "custom"
         return self.mode
 
 

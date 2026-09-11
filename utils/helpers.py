@@ -20,6 +20,7 @@ class BBox:
     cls_id: int = -1
     track_id: int = -1
     label: str = ""
+    family: str = ""  # "aerial" | "ground" | ""
 
     @property
     def cx(self) -> float:
@@ -60,6 +61,7 @@ class BBox:
             cls_id=self.cls_id,
             track_id=self.track_id,
             label=self.label,
+            family=self.family,
         )
 
     def iou(self, other: "BBox") -> float:

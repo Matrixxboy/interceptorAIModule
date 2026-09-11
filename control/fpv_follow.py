@@ -277,7 +277,7 @@ class FPVFollowController:
         v_w_I = self._estimate_interceptor_velocity(p_w_t)
 
         # ── PPN Guidance (only when velocity is trusted) ──
-        ppn_enabled = bool(getattr(safety, "ppn_enabled", True))
+        ppn_enabled = bool(getattr(safety, "ppn_enabled", False))
         ppn_active = ppn_enabled and vel_confident
         psi_ref = 0.0
         if ppn_active:

@@ -158,7 +158,10 @@ class DeviceOptionsPanel(QWidget):
         form.addRow(self.chk_stab)
         form.addRow(self.chk_calib_focal)
 
-        hint = QLabel("Set tilt to match how the camera is mounted — the aim line in the feed moves with it.")
+        hint = QLabel(
+            "Front FPV: set tilt to the nose-camera angle (often 15–30° up). "
+            "The aim line in the feed moves with it — match the real mount."
+        )
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #8a94a6; font-size: 10px;")
         form.addRow(hint)

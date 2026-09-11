@@ -23,6 +23,7 @@ class DistanceEstimator:
         self.cfg = cfg or DistanceConfig()
         self._integral_err = 0.0
         self._prev_err = 0.0
+        self._target_width_m: float | None = None
 
     def update_config(self, cfg: DistanceConfig) -> None:
         self.cfg = cfg
@@ -30,13 +31,22 @@ class DistanceEstimator:
     def reset(self) -> None:
         self._integral_err = 0.0
         self._prev_err = 0.0
+        self._target_width_m = None
+
+    def set_target_width_m(self, width_m: float | None) -> None:
+        self._target_width_m = float(width_m) if width_m is not None else None
+
+    def _width_m(self) -> float:
+        if self._target_width_m is not None and self._target_width_m > 0.01:
+            return float(self._target_width_m)
+        return float(self.cfg.known_object_width_m)
 
     def estimate_distance(self, bbox_width_px: float) -> float:
         """Pinhole distance from a single pixel size along the calibrated axis."""
         return estimate_distance_m(
             bbox_width_px,
             self.cfg.focal_length_px,
-            self.cfg.known_object_width_m,
+            self._width_m(),
         )
 
     def estimate_distance_from_bbox(self, bbox_xywh: tuple[float, float, float, float]) -> float:

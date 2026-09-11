@@ -185,12 +185,21 @@ class LiveFeedPage(QWidget):
         btn_override.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         btn_override.clicked.connect(self._on_manual_override)
 
+        self.combo_target = QComboBox()
+        self.combo_target.setToolTip("Auto-lock and reacquire: drones, ground vehicles, or both")
+        self.combo_target.addItem("Auto", "auto")
+        self.combo_target.addItem("Drone", "aerial")
+        self.combo_target.addItem("Vehicle", "ground")
+        self.combo_target.setMinimumWidth(96)
+        self.combo_target.currentIndexChanged.connect(self._on_target_type)
+
         ctrl.addWidget(btn_lock, 0, 0)
         ctrl.addWidget(btn_reset, 0, 1)
         ctrl.addWidget(self.btn_assist, 0, 2)
         ctrl.addWidget(self.btn_arm, 0, 3)
         ctrl.addWidget(btn_override, 0, 4)
-        for c in range(5):
+        ctrl.addWidget(self.combo_target, 0, 5)
+        for c in range(6):
             ctrl.setColumnStretch(c, 1)
 
         # Throttle row
@@ -234,7 +243,7 @@ class LiveFeedPage(QWidget):
         thr_hint.setToolTip("U +25 · J −25 · A arm · X disarm")
         thr.addWidget(thr_hint)
         thr.addStretch(1)
-        ctrl.addWidget(thr_wrap, 1, 0, 1, 5)
+        ctrl.addWidget(thr_wrap, 1, 0, 1, 6)
         left_l.addWidget(ctrl_bar)
 
         # Metrics
@@ -428,6 +437,11 @@ class LiveFeedPage(QWidget):
     @pyqtSlot(int, int, int, int)
     def _on_roi_selected(self, x: int, y: int, w: int, h: int) -> None:
         self.worker.set_roi_lock(x, y, w, h)
+
+    def _on_target_type(self) -> None:
+        kind = self.combo_target.currentData()
+        if kind:
+            self.worker.set_target_type(str(kind))
 
     def _on_reset_lock(self) -> None:
         self.worker.reset_lock()

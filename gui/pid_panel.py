@@ -56,8 +56,8 @@ class PIDTuningPanel(QWidget):
 
         s = self.sys_config.safety
         self.chk_ppn = QCheckBox("Enable PPN")
-        self.chk_ppn.setChecked(bool(getattr(s, "ppn_enabled", True)))
-        self.chk_ppn.setToolTip("When off, sticks use visual PID + distance only")
+        self.chk_ppn.setChecked(bool(getattr(s, "ppn_enabled", False)))
+        self.chk_ppn.setToolTip("Chase FPV leaves this off. Enable for aerial intercept lead.")
         self.sp_ppn_n = _spin(
             float(getattr(s, "ppn_n", 3.0)), 1.0, 8.0, 0.1,
             "Navigation constant N_p (typically 3–5)",
@@ -184,7 +184,7 @@ class PIDTuningPanel(QWidget):
         ]
         for w in widgets:
             w.blockSignals(True)
-        self.chk_ppn.setChecked(bool(getattr(s, "ppn_enabled", True)))
+        self.chk_ppn.setChecked(bool(getattr(s, "ppn_enabled", False)))
         self.sp_ppn_n.setValue(float(getattr(s, "ppn_n", 3.0)))
         self.sp_ppn_gain.setValue(float(getattr(s, "ppn_gain", 30.0)))
         self.sp_ppn_yaw.setValue(float(getattr(s, "ppn_yaw_lead_gain", 80.0)))

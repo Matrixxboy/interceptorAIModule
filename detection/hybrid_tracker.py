@@ -8,7 +8,8 @@ from typing import Literal
 import cv2
 import numpy as np
 
-from config import CONFIG, DetectionConfig, TrackerConfig
+from config import CONFIG, DetectionConfig, TrackerConfig, known_width_m
+from detection.dual_detector import DualDetector
 from detection.pixel_lock import PixelLockEngine
 from detection.yolo_detector import YOLODetector
 from utils.helpers import BBox
@@ -61,32 +62,35 @@ class HybridYoloLockTracker:
         cv_kind: CvKind = "csrt",
         yolo_every_n: int | None = None,
         reacquire_iou: float = 0.25,
-        max_hold_frames: int = 20,
+        max_hold_frames: int = 45,
     ) -> None:
         self.det_cfg = det_cfg or CONFIG.detection
         self.tcfg = tracker_cfg or CONFIG.tracker
-        # Prefer config lock_tracker when set
         cfg_kind = getattr(self.tcfg, "lock_tracker", cv_kind)
         self.cv_kind: CvKind = cfg_kind if cfg_kind in ("csrt", "kcf") else cv_kind
-        # Cadence from DetectionConfig.detect_every_n (fallback 6)
         n = yolo_every_n if yolo_every_n is not None else getattr(self.det_cfg, "detect_every_n", 6)
         self.yolo_every_n = max(1, int(n))
         self.yolo_every_n_healthy = max(
             self.yolo_every_n,
             int(getattr(self.det_cfg, "detect_every_n_healthy", 24)),
         )
-        self.reacquire_iou = reacquire_iou
-        self.max_hold_frames = max_hold_frames
+        self.reacquire_iou = float(getattr(self.tcfg, "reacquire_iou", reacquire_iou))
+        self.max_hold_frames = max(
+            int(max_hold_frames),
+            int(getattr(self.tcfg, "reacquire_max_frames", 90)),
+        )
 
-        self.detector: YOLODetector | None = None
+        self.dual = DualDetector(self.det_cfg)
+        self.detector: DualDetector | YOLODetector | None = self.dual
         self.pixel_engine = PixelLockEngine()
-        # Size authority for distance — no CSRT inside (hybrid blends center separately)
         self.scale_lock = ScaleAwareLock(use_csrt=False)
         self._cv = None
         self._locked = False
         self._bbox: tuple[int, int, int, int] | None = None
         self._bbox_f: tuple[float, float, float, float] | None = None
         self._label = ""
+        self._family = ""
+        self._known_width_m = 0.30
         self._cls_id = -1
         self._target_hist: np.ndarray | None = None
         self._conf = 0.0
@@ -96,40 +100,37 @@ class HybridYoloLockTracker:
         self._manual_lock = False
         self._detector_error: str | None = None
         self._vx, self._vy = 0.0, 0.0
+        self._offscreen = False
+
+    @property
+    def family(self) -> str:
+        return self._family
+
+    @property
+    def known_width_m(self) -> float:
+        return self._known_width_m
 
     def apply_detection_config(self, det_cfg: DetectionConfig) -> None:
-        """Live-update cadence / conf from SystemConfig without reloading YOLO mid-frame."""
-        prev_mode = getattr(self.det_cfg, "mode", None)
-        prev_custom = str(getattr(self.det_cfg, "custom_weights", ""))
         self.det_cfg = det_cfg
         self.yolo_every_n = max(1, int(getattr(det_cfg, "detect_every_n", 6)))
         self.yolo_every_n_healthy = max(
             self.yolo_every_n,
             int(getattr(det_cfg, "detect_every_n_healthy", 24)),
         )
-        # Force reload if mode or custom weights path changed
-        new_custom = str(getattr(det_cfg, "custom_weights", ""))
-        if self.detector is not None and (
-            prev_mode != det_cfg.mode or prev_custom != new_custom
-        ):
-            self.detector = None
-            self._detector_error = None
-            log.info("YOLO will reload on next detect (mode/weights changed)")
-    def ensure_detector(self) -> YOLODetector:
+        self.dual.apply_config(det_cfg)
+        self.detector = self.dual
+
+    def ensure_detector(self) -> DualDetector:
         if self._detector_error is not None:
             raise RuntimeError(self._detector_error)
-        if self.detector is None:
-            log.info("Loading YOLO for hybrid lock…")
-            try:
-                # Deliberately lazy: this runs in TrackingWorkerThread, never in
-                # the Qt GUI constructor. CUDA startup / weight loading can take
-                # tens of seconds on a newly configured machine.
-                self.detector = YOLODetector(self.det_cfg)
-            except Exception as exc:
-                self._detector_error = f"YOLO unavailable: {exc}"
-                log.exception(self._detector_error)
-                raise RuntimeError(self._detector_error) from exc
-        return self.detector
+        try:
+            self.dual.ensure()
+        except Exception as exc:
+            self._detector_error = f"YOLO unavailable: {exc}"
+            log.exception(self._detector_error)
+            raise RuntimeError(self._detector_error) from exc
+        self.detector = self.dual
+        return self.dual
 
     @property
     def locked(self) -> bool:
@@ -147,6 +148,8 @@ class HybridYoloLockTracker:
         self._bbox = None
         self._bbox_f = None
         self._label = ""
+        self._family = ""
+        self._known_width_m = 0.30
         self._cls_id = -1
         self._target_hist = None
         self._conf = 0.0
@@ -154,9 +157,24 @@ class HybridYoloLockTracker:
         self._frame_i = 0
         self._manual_lock = False
         self._vx, self._vy = 0.0, 0.0
+        self._offscreen = False
+
+    def _wanted_families(self) -> tuple[str, ...]:
+        want = str(getattr(self.det_cfg, "target_type", "auto") or "auto").lower()
+        if self._locked and self._family in ("aerial", "ground"):
+            return (self._family,)
+        if want == "aerial":
+            return ("aerial",)
+        if want == "ground":
+            return ("ground",)
+        return ("aerial", "ground")
 
     def detect_only(self, frame: np.ndarray) -> list[BBox]:
-        dets = self.ensure_detector().detect(frame)
+        families = self._wanted_families()
+        allow_crop = (not self._locked) and ("aerial" in families)
+        dets = self.ensure_detector().detect(
+            frame, families=families, allow_aerial_crop=allow_crop
+        )
         self._last_dets = dets
         return dets
 
@@ -180,6 +198,15 @@ class HybridYoloLockTracker:
             return 0.0
         return float(cv2.compareHist(self._target_hist, cand_hist, cv2.HISTCMP_CORREL))
 
+    def _blend_hist(self, frame: np.ndarray, xywh: tuple[int, int, int, int]) -> None:
+        fresh = self._compute_hist(frame, xywh)
+        if fresh is None:
+            return
+        if self._target_hist is None:
+            self._target_hist = fresh
+            return
+        self._target_hist = 0.92 * self._target_hist + 0.08 * fresh
+
     @staticmethod
     def _as_int(xywh: tuple[float, float, float, float]) -> tuple[int, int, int, int]:
         x, y, w, h = xywh
@@ -201,18 +228,25 @@ class HybridYoloLockTracker:
         self._target_hist = self._compute_hist(frame, box)
         self._set_bbox((float(x), float(y), float(w), float(h)))
         self._label = label
+        if not self._family:
+            self._family = "ground" if label.lower() in ("car", "truck", "bus", "motorcycle", "motorbike") else "aerial"
+        self._known_width_m = known_width_m(self._label, self._family, 0.30)
         self._cls_id = -1
         self._conf = 1.0
         self._locked = True
         self._lost = 0
         self._frame_i = 0
+        self._offscreen = False
         self._manual_lock = label == "manual" or label.startswith("manual")
         return True
 
     def lock_bbox(self, frame: np.ndarray, box: BBox) -> bool:
+        self._family = box.family or self._family
         ok = self.lock_xywh(frame, box.as_int_xywh(), label=box.label or "yolo")
         if ok:
             self._cls_id = box.cls_id
+            self._family = box.family or self._family
+            self._known_width_m = known_width_m(self._label, self._family, 0.30)
             self._manual_lock = False
         return ok
 
@@ -249,11 +283,31 @@ class HybridYoloLockTracker:
         self._start_cv(frame, xywh)
         self._target_hist = self._compute_hist(frame, xywh)
 
+    def _search_roi(self, frame_w: int, frame_h: int) -> tuple[float, float, float, float] | None:
+        if self._bbox_f is None:
+            return None
+        x, y, w, h = self._bbox_f
+        pad_x = abs(self._vx) * float(self._lost + 1) + 0.35 * w + 24.0
+        pad_y = abs(self._vy) * float(self._lost + 1) + 0.35 * h + 24.0
+        x1 = max(0.0, x - pad_x)
+        y1 = max(0.0, y - pad_y)
+        x2 = min(float(frame_w), x + w + pad_x)
+        y2 = min(float(frame_h), y + h + pad_y)
+        return (x1, y1, x2, y2)
+
+    def _center_in_roi(self, box: BBox, roi: tuple[float, float, float, float]) -> bool:
+        return roi[0] <= box.cx <= roi[2] and roi[1] <= box.cy <= roi[3]
+
+    def _same_family(self, box: BBox) -> bool:
+        if not self._family or not box.family:
+            return True
+        return box.family == self._family
+
     def update(self, frame: np.ndarray) -> HybridResult:
         self._frame_i += 1
         dets: list[BBox] = []
+        fh, fw = frame.shape[:2]
 
-        # YOLO is expensive — skip most frames while locked with a healthy scale lock
         if not self._locked:
             run_yolo = True
         elif self.scale_lock.locked and self.scale_lock.last_score >= 0.50:
@@ -273,10 +327,8 @@ class HybridYoloLockTracker:
         if not self._locked:
             return HybridResult(False, None, "lost", "", 0.0, dets)
 
-        # 1) Scale-aware lock — authoritative for W/H (distance)
         sc_ok, sc_box = self.scale_lock.update(frame)
 
-        # 2) Optical flow — assist center (every other frame when scale lock is strong)
         pix_ok = False
         pix_box = None
         pix_conf = 0.0
@@ -284,7 +336,6 @@ class HybridYoloLockTracker:
         if run_flow:
             pix_ok, pix_box, pix_conf, _ = self.pixel_engine.update(frame)
 
-        # 3) CSRT/KCF — only if enabled (default off for speed)
         cv_ok = False
         cv_box = None
         if self._cv is not None and (not sc_ok or self._frame_i % 2 == 1):
@@ -315,18 +366,14 @@ class HybridYoloLockTracker:
             xywh_f = (cx - sw * 0.5, cy - sh * 0.5, sw, sh)
             target_ok = True
             source = "scale_lock"
-            # Map NCC score → follow confidence. Raw NCC ~0.55 used to sit under the
-            # 60% follow gate and silently disable AI stick output.
             score = float(self.scale_lock.last_score)
             self._conf = max(0.70, min(1.0, 0.55 + 0.60 * max(0.0, score)))
 
         elif pix_ok and pix_box is not None:
-            # Fallback: flow box, but do not let CSRT inflate size
             px, py, pw, ph = pix_box
             if cv_ok and cv_box is not None:
                 cx = 0.75 * (px + pw * 0.5) + 0.25 * (cv_box[0] + cv_box[2] * 0.5)
                 cy = 0.75 * (py + ph * 0.5) + 0.25 * (cv_box[1] + cv_box[3] * 0.5)
-                # Keep flow size; ignore CSRT size
                 xywh_f = (cx - pw * 0.5, cy - ph * 0.5, pw, ph)
             else:
                 xywh_f = (float(px), float(py), float(pw), float(ph))
@@ -352,80 +399,103 @@ class HybridYoloLockTracker:
 
         xywh = self._as_int(xywh_f) if xywh_f is not None else self._bbox
 
-        # 4) YOLO verification — do not steal a healthy lock
         healthy_lock = (
             target_ok
             and self.scale_lock.locked
             and float(self.scale_lock.last_score) >= 0.50
         )
+        if healthy_lock and xywh is not None:
+            self._blend_hist(frame, xywh)
+
+        # YOLO may reacquire when the lock is weak/lost — never steal a healthy lock.
         if run_yolo and dets and xywh is not None and not healthy_lock:
+            roi = self._search_roi(fw, fh)
+            hist_thr = float(getattr(self.tcfg, "template_match_threshold", 0.45))
             candidates = []
             for d in dets:
+                if not self._same_family(d):
+                    continue
                 iou = self._iou_xywh(xywh, d)
-                if iou >= 0.10:
-                    hist_sim = self._compare_hist(frame, d)
-                    cls_match = 1.2 if (self._cls_id >= 0 and d.cls_id == self._cls_id) else 1.0
-                    score = (iou * 0.6 + hist_sim * 0.4) * cls_match
-                    candidates.append((score, iou, hist_sim, d))
+                in_roi = roi is not None and self._center_in_roi(d, roi)
+                if iou < 0.08 and not in_roi:
+                    continue
+                hist_sim = self._compare_hist(frame, d)
+                cls_match = 1.2 if (self._cls_id >= 0 and d.cls_id == self._cls_id) else 1.0
+                score = (max(iou, 0.15 if in_roi else 0.0) * 0.6 + hist_sim * 0.4) * cls_match
+                candidates.append((score, iou, hist_sim, in_roi, d))
 
             if candidates:
                 candidates.sort(key=lambda item: item[0], reverse=True)
-                best_score, best_iou, best_hist, best_box = candidates[0]
+                best_score, best_iou, best_hist, in_roi, best_box = candidates[0]
                 yolo_xywh = self._xywh_from_box(best_box)
 
                 if target_ok and xywh_f is not None:
-                    # While tracking: only accept YOLO size if close to current lock size
                     yw, yh = float(yolo_xywh[2]), float(yolo_xywh[3])
                     sw, sh = xywh_f[2], xywh_f[3]
                     size_ok = (
                         0.72 <= (yw / max(1.0, sw)) <= 1.35
                         and 0.72 <= (yh / max(1.0, sh)) <= 1.35
                     )
-                    if best_iou >= 0.45 and best_hist >= 0.45 and size_ok and not self._manual_lock:
+                    if (
+                        best_iou >= 0.45
+                        and best_hist >= hist_thr
+                        and size_ok
+                        and not self._manual_lock
+                    ):
                         self._reinit_trackers(frame, yolo_xywh, best_box.label or self._label)
                         xywh_f = (float(yolo_xywh[0]), float(yolo_xywh[1]), yw, yh)
                         xywh = yolo_xywh
                         self._conf = best_box.conf
+                        self._label = best_box.label or self._label
                         source = "yolo"
                     elif best_iou >= 0.50 and best_hist >= 0.40:
-                        # Center-only snap — keep current measured size (critical for distance)
                         cx = yolo_xywh[0] + yolo_xywh[2] * 0.5
                         cy = yolo_xywh[1] + yolo_xywh[3] * 0.5
                         sw, sh = xywh_f[2], xywh_f[3]
                         xywh_f = (cx - sw * 0.5, cy - sh * 0.5, sw, sh)
                         xywh = self._as_int(xywh_f)
-                else:
-                    # Lost → allow YOLO reacquire with appearance match
-                    if best_hist >= 0.45:
-                        self._reinit_trackers(frame, yolo_xywh, best_box.label or self._label)
-                        xywh_f = (
-                            float(yolo_xywh[0]),
-                            float(yolo_xywh[1]),
-                            float(yolo_xywh[2]),
-                            float(yolo_xywh[3]),
-                        )
-                        xywh = yolo_xywh
-                        target_ok = True
-                        self._conf = best_box.conf
-                        source = "yolo"
-                        self._manual_lock = False
+                elif best_hist >= hist_thr and (best_iou >= self.reacquire_iou or in_roi):
+                    self._reinit_trackers(frame, yolo_xywh, best_box.label or self._label)
+                    xywh_f = (
+                        float(yolo_xywh[0]),
+                        float(yolo_xywh[1]),
+                        float(yolo_xywh[2]),
+                        float(yolo_xywh[3]),
+                    )
+                    xywh = yolo_xywh
+                    target_ok = True
+                    self._conf = best_box.conf
+                    self._label = best_box.label or self._label
+                    source = "yolo"
+                    self._manual_lock = False
+                    self._offscreen = False
 
         if target_ok and xywh_f is not None:
             if self._bbox_f is not None:
                 self._vx = xywh_f[0] - self._bbox_f[0]
                 self._vy = xywh_f[1] - self._bbox_f[1]
             out = self._set_bbox(xywh_f)
-            # Keep pixel engine bbox in sync so flow assist stays coherent
             if hasattr(self.pixel_engine, "bbox_xywh"):
                 self.pixel_engine.bbox_xywh = xywh_f
             self._lost = 0
+            cx = xywh_f[0] + xywh_f[2] * 0.5
+            cy = xywh_f[1] + xywh_f[3] * 0.5
+            margin = 8.0
+            self._offscreen = (
+                cx < margin or cy < margin or cx > fw - margin or cy > fh - margin
+            )
             return HybridResult(True, out, source, self._label, self._conf, dets)
 
         self._lost += 1
-        if self._lost <= self.max_hold_frames and self._bbox is not None:
+        hold_limit = self.max_hold_frames
+        if self._offscreen:
+            hold_limit = max(hold_limit, 75)
+        if self._lost <= hold_limit and self._bbox is not None:
             if self._bbox_f is not None:
                 nx = self._bbox_f[0] + self._vx
                 ny = self._bbox_f[1] + self._vy
+                nx = float(np.clip(nx, -self._bbox_f[2] * 0.4, fw - self._bbox_f[2] * 0.6))
+                ny = float(np.clip(ny, -self._bbox_f[3] * 0.4, fh - self._bbox_f[3] * 0.6))
                 self._set_bbox((nx, ny, self._bbox_f[2], self._bbox_f[3]))
             return HybridResult(True, self._bbox, "hold", self._label, self._conf * 0.85, dets)
 

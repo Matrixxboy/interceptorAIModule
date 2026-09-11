@@ -24,8 +24,9 @@ log = setup_logger("cuas.yolo")
 
 
 class YOLODetector:
-    def __init__(self, cfg: DetectionConfig | None = None) -> None:
+    def __init__(self, cfg: DetectionConfig | None = None, family: str = "") -> None:
         self.cfg = cfg or CONFIG.detection
+        self.family = family
         self.device = select_torch_device(self.cfg.device)
         self.half = bool(self.cfg.half and self.device == "cuda")
         self._model = None
@@ -191,10 +192,7 @@ class YOLODetector:
         if with_id and r0.boxes.id is not None:
             ids = r0.boxes.id.detach().cpu().numpy().astype(int)
 
-        class_filter: Sequence[int] = ()
-        effective = self.cfg.resolved_mode() if hasattr(self.cfg, "resolved_mode") else self.cfg.mode
-        if effective == "coco":
-            class_filter = self.cfg.class_filter
+        class_filter: Sequence[int] = tuple(self.cfg.class_filter or ())
 
         for i in range(len(xyxy)):
             cls_id = int(clss[i])
@@ -224,6 +222,7 @@ class YOLODetector:
                     cls_id=cls_id,
                     track_id=tid,
                     label=label,
+                    family=self.family,
                 )
             )
 

@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from config import DetectionConfig, SystemConfig
+from config import DetectionConfig, SystemConfig, known_width_m
 from control.fpv_follow import FPVFollowController
 from detection.hybrid_tracker import HybridYoloLockTracker
 from tracking.kalman_filter_3d import KalmanFilter3D
@@ -19,14 +19,26 @@ from tracking.ppn_guidance import PPNGuidance
 
 def test_detection_resolved_mode() -> None:
     cfg = DetectionConfig(mode="coco")
-    # Without custom weights file, stays coco
-    assert cfg.resolved_mode() in ("coco", "custom")
-    custom = Path(cfg.custom_weights)
+    # Dual detector uses COCO for vehicles; coco mode must stay coco even if custom weights exist.
+    assert cfg.resolved_mode() == "coco"
+    custom_cfg = DetectionConfig(mode="custom")
+    custom = Path(custom_cfg.custom_weights)
     if custom.is_file():
-        assert cfg.resolved_mode() == "custom"
+        assert custom_cfg.resolved_mode() == "custom"
     else:
-        assert cfg.resolved_mode() == "coco"
+        assert custom_cfg.resolved_mode() == "coco"
     print("OK detection resolved_mode")
+
+
+def test_known_width_and_target_filter() -> None:
+    assert known_width_m("car", "ground") == 1.80
+    assert known_width_m("drone", "aerial") == 0.30
+    assert known_width_m("", "ground") == 1.80
+    hy = HybridYoloLockTracker(det_cfg=DetectionConfig(target_type="ground"), tracker_cfg=SystemConfig().tracker)
+    assert hy._wanted_families() == ("ground",)
+    hy.det_cfg.target_type = "aerial"
+    assert hy._wanted_families() == ("aerial",)
+    print("OK known width + target filter")
 
 
 def test_hybrid_detect_every_n() -> None:
@@ -88,6 +100,7 @@ def test_follow_controller_smoke() -> None:
 
 def main() -> None:
     test_detection_resolved_mode()
+    test_known_width_and_target_filter()
     test_hybrid_detect_every_n()
     test_kalman3d_predict_then_update()
     test_ppn_exposes_omega()

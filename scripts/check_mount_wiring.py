@@ -51,7 +51,7 @@ legacy = Path(__file__).with_name("_legacy.json")
 legacy.write_text('{"camera": {"fov_h_deg": 100.0, "camera_index": 2}}', encoding="utf-8")
 old = SystemConfig.load_json(legacy)
 assert old.camera.fov_h_deg == 100.0 and old.camera.camera_index == 2
-assert old.camera.mount_pitch_deg == 0.0 and old.camera.vertical_ref == "level"
+assert old.camera.mount_pitch_deg == 20.0 and old.camera.vertical_ref == "level"
 legacy.unlink()
 print("-- legacy preset without mount keys loads with defaults: OK")
 
@@ -69,8 +69,14 @@ class _HudStub:
         self.controller = controller
         self.active_target = None
         self.active_cam_idx = 0
+        self.active_cam_name = ""
         self.current_fps = 30.0
         self.is_connected = False
+        self.assist_enabled = False
+        self.follow_status = "IDLE"
+        self.flight_mode = "ANGLE"
+        self.arm_requested = False
+        self.throttle_value = 1000
 
 
 class _Safety:
@@ -107,7 +113,7 @@ assert cfg.camera.mount_pitch_deg == 18.0, cfg.camera.mount_pitch_deg
 panel.cmb_vert_ref.setCurrentIndex(1)
 assert cfg.camera.vertical_ref == "image", cfg.camera.vertical_ref
 panel.load_config(SystemConfig())
-assert panel.sp_mount_pitch.value() == 0.0
+assert panel.sp_mount_pitch.value() == 20.0
 print("-- settings page mount controls read/write config: OK")
 
 print("\nALL WIRING CHECKS PASSED")
